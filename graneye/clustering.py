@@ -11,6 +11,23 @@ def _name_key(value: str) -> str:
     return normalize_name(value)
 
 
+def _name_token_signature(name: str) -> str:
+    """Create an order-insensitive signature for likely first/last-name swaps."""
+
+    tokens = [token for token in name.split(" ") if token]
+    if len(tokens) < 2:
+        return ""
+
+    # Only apply this relaxed signature to compact person-like names.
+    if len(tokens) > 3:
+        return ""
+
+    if any(len(token) <= 1 for token in tokens):
+        return ""
+
+    return " ".join(sorted(tokens))
+
+
 def _metadata_handle(record: ProfileRecord) -> str:
     handle = record.metadata.get("handle")
     if isinstance(handle, str) and handle.strip():
@@ -20,15 +37,16 @@ def _metadata_handle(record: ProfileRecord) -> str:
 
 def _cluster_key(record: ProfileRecord) -> str:
     name = _name_key(record.display_name)
+    signature = _name_token_signature(name)
     handle = _metadata_handle(record)
 
     # If the handle contains the normalized name tokens, prefer the name key.
     if handle and name:
         compact_name = name.replace(" ", "")
         if compact_name and compact_name in handle:
-            return name
+            return signature or name
 
-    return name or handle or record.identifier.casefold()
+    return signature or name or handle or record.identifier.casefold()
 
 
 def cluster_identities(records: Iterable[ProfileRecord]) -> list[IdentityCluster]:
