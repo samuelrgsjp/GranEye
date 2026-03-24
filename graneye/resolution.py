@@ -215,6 +215,11 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     score += 0.3 * context_strength
     reasons.extend(context_reasons)
 
+    has_context_constraints = any([context.profession, context.location, context.expected_domains])
+    if has_context_constraints and name_match in {"full_match", "reordered_match"} and context_strength < 0.12:
+        score -= 0.22
+        reasons.append("weak_context_exact_name_penalty")
+
     if entity_type == "person_profile":
         score += 0.08
         reasons.append("profile_structure_bonus")

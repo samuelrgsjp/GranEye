@@ -36,6 +36,25 @@ SAMPLE_DDG_HTML_FALLBACK = """
 </html>
 """
 
+SAMPLE_DDG_HTML_INTERNAL = """
+<html>
+  <body>
+    <article class="result result--web">
+      <h2 class="result__title">
+        <a class="result__a" href="https://duckduckgo.com/privacy">here</a>
+      </h2>
+      <div class="result__snippet">DuckDuckGo protection privacy peace of mind</div>
+    </article>
+    <article class="result result--web">
+      <h2 class="result__title">
+        <a class="result__a" href="https://example.net/in/laura-gomez">Laura Gómez Martínez - Bio</a>
+      </h2>
+      <div class="result__snippet">Lawyer in Barcelona.</div>
+    </article>
+  </body>
+</html>
+"""
+
 
 class _FakeResponse(io.BytesIO):
     def __enter__(self) -> "_FakeResponse":
@@ -100,3 +119,22 @@ def test_parse_duckduckgo_html_results_has_fallback_link_extraction() -> None:
     results = search.parse_duckduckgo_html_results(SAMPLE_DDG_HTML_FALLBACK, max_results=10)
     assert results
     assert results[0]["url"] == "https://example.com/in/jane-doe"
+
+
+def test_parse_duckduckgo_html_results_filters_internal_duckduckgo_pages() -> None:
+    results = search.parse_duckduckgo_html_results(SAMPLE_DDG_HTML_INTERNAL, max_results=10)
+    assert len(results) == 1
+    assert results[0]["url"] == "https://example.net/in/laura-gomez"
+    assert all("duckduckgo.com" not in item["url"] for item in results)
+
+
+def test_enrich_search_results_filters_placeholder_titles_and_preserves_valid_external() -> None:
+    enriched = search.enrich_search_results(
+        [
+            {"title": "here", "url": "https://example.com/profile", "snippet": "placeholder"},
+            {"title": "Satya Nadella - Microsoft", "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella", "snippet": "CEO of Microsoft"},
+            {"title": "DuckDuckGo privacy", "url": "https://duckduckgo.com/privacy", "snippet": "privacy page"},
+        ]
+    )
+    assert len(enriched) == 1
+    assert enriched[0].url == "https://www.microsoft.com/en-us/about/leadership/satya-nadella"
