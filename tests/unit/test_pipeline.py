@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from graneye.pipeline import resolve_query
+from graneye.pipeline import resolve_query, resolve_query_with_debug
 
 
 def test_resolve_query_merges_html_and_instant_results_without_duplicates() -> None:
@@ -35,3 +35,25 @@ def test_resolve_query_returns_no_output_when_all_searches_empty() -> None:
 
     assert output is None
     assert ranked == []
+
+
+def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
+    html_results = [
+        {"title": "Satya Nadella - Microsoft", "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella", "snippet": "Chairman and CEO"},
+        {"title": "DuckDuckGo privacy", "url": "https://duckduckgo.com/privacy", "snippet": "privacy page"},
+    ]
+
+    output, ranked, diagnostics = resolve_query_with_debug(
+        "Satya Nadella",
+        context="Microsoft CEO",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: [],
+    )
+
+    assert output is not None
+    assert ranked
+    assert diagnostics.raw_results_count == 2
+    assert diagnostics.normalized_results_count == 2
+    assert diagnostics.filtered_results_count == 1
+    assert diagnostics.ranked_candidates_count == len(ranked)
+    assert any(decision.reason == "search_engine_or_internal" for decision in diagnostics.filter_decisions)

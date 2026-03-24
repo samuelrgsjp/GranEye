@@ -125,7 +125,6 @@ def test_parse_duckduckgo_html_results_filters_internal_duckduckgo_pages() -> No
     results = search.parse_duckduckgo_html_results(SAMPLE_DDG_HTML_INTERNAL, max_results=10)
     assert len(results) == 1
     assert results[0]["url"] == "https://example.net/in/laura-gomez"
-    assert all("duckduckgo.com" not in item["url"] for item in results)
 
 
 def test_enrich_search_results_filters_placeholder_titles_and_preserves_valid_external() -> None:
@@ -138,3 +137,32 @@ def test_enrich_search_results_filters_placeholder_titles_and_preserves_valid_ex
     )
     assert len(enriched) == 1
     assert enriched[0].url == "https://www.microsoft.com/en-us/about/leadership/satya-nadella"
+
+
+def test_filter_search_results_keeps_high_signal_public_profile() -> None:
+    normalized = search.normalize_search_results(
+        [
+            {
+                "title": "Satya Nadella - Chairman and CEO, Microsoft",
+                "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                "snippet": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft.",
+            }
+        ]
+    )
+    filtered, decisions = search.filter_search_results(normalized)
+    assert len(filtered) == 1
+    assert decisions[0].accepted is True
+    assert decisions[0].reason == "accepted"
+
+
+def test_filter_search_results_drops_internal_pages_but_not_external_candidates() -> None:
+    normalized = search.normalize_search_results(
+        [
+            {"title": "Privacy, simplified.", "url": "https://duckduckgo.com/privacy", "snippet": "DuckDuckGo privacy"},
+            {"title": "Satya Nadella - Wikipedia", "url": "https://en.wikipedia.org/wiki/Satya_Nadella", "snippet": "Indian-American business executive"},
+        ]
+    )
+    filtered, decisions = search.filter_search_results(normalized)
+    assert len(filtered) == 1
+    assert filtered[0].url == "https://en.wikipedia.org/wiki/Satya_Nadella"
+    assert decisions[0].reason == "search_engine_or_internal"

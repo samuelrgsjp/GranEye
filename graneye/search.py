@@ -62,6 +62,15 @@ class SearchResult:
     snippet: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class FilterDecision:
+    """Decision trace for filtering a normalized search result."""
+
+    result: SearchResult
+    accepted: bool
+    reason: str
+
+
 def _to_text(value: Any) -> str:
     if value is None:
         return ""
@@ -132,18 +141,30 @@ def _is_internal_or_search_engine_page(url: str) -> bool:
 
 
 def _is_candidate_worthy_result(title: str, url: str, snippet: str = "") -> bool:
+    return evaluate_candidate_result(title, url, snippet).accepted
+
+
+def evaluate_candidate_result(title: str, url: str, snippet: str = "") -> FilterDecision:
+    result = SearchResult(
+        title=title,
+        url=url,
+        domain=urlparse(url).netloc.casefold().removeprefix("www.") if url else "",
+        snippet=snippet or None,
+    )
+    if not url:
+        return FilterDecision(result=result, accepted=False, reason="missing_url")
     if not _is_likely_web_result(url):
-        return False
+        return FilterDecision(result=result, accepted=False, reason="non_http_url")
     if _is_internal_or_search_engine_page(url):
-        return False
+        return FilterDecision(result=result, accepted=False, reason="search_engine_or_internal")
     if not _is_non_trivial_title(title):
-        return False
+        return FilterDecision(result=result, accepted=False, reason="trivial_title")
     if not urlparse(url).netloc:
-        return False
+        return FilterDecision(result=result, accepted=False, reason="missing_domain")
     text = " ".join(part for part in [title, snippet] if part).casefold()
     if any(token in text for token in ("duckduckgo", "privacy", "protection", "safe search")):
-        return False
-    return True
+        return FilterDecision(result=result, accepted=False, reason="search_engine_noise_text")
+    return FilterDecision(result=result, accepted=True, reason="accepted")
 
 
 def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[dict[str, str]]:
@@ -168,7 +189,9 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
 
         if not url or url in seen_urls:
             continue
-        if not _is_candidate_worthy_result(title, url, snippet):
+        if not _is_likely_web_result(url):
+            continue
+        if not _is_non_trivial_title(title):
             continue
 
         seen_urls.add(url)
@@ -187,7 +210,9 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
         if not title or not url or url in seen_urls:
             continue
 
-        if not _is_candidate_worthy_result(title, url):
+        if not _is_likely_web_result(url):
+            continue
+        if not _is_non_trivial_title(title):
             continue
 
         seen_urls.add(url)
@@ -280,15 +305,28 @@ def normalize_search_result(payload: Mapping[str, Any]) -> SearchResult:
     )
 
 
+def normalize_search_results(raw_results: list[Mapping[str, Any]]) -> list[SearchResult]:
+    return [normalize_search_result(item) for item in raw_results]
+
+
+def filter_search_results(results: list[SearchResult]) -> tuple[list[SearchResult], list[FilterDecision]]:
+    filtered: list[SearchResult] = []
+    decisions: list[FilterDecision] = []
+    seen_urls: set[str] = set()
+    for result in results:
+        decision = evaluate_candidate_result(result.title, result.url, result.snippet or "")
+        if decision.accepted and result.url in seen_urls:
+            decision = FilterDecision(result=result, accepted=False, reason="duplicate_url")
+        if decision.accepted:
+            filtered.append(result)
+            seen_urls.add(result.url)
+        decisions.append(FilterDecision(result=result, accepted=decision.accepted, reason=decision.reason))
+    return filtered, decisions
+
+
 def enrich_search_results(raw_results: list[Mapping[str, Any]]) -> list[SearchResult]:
     """Normalize search results while preserving ordering and missing snippets."""
 
-    enriched: list[SearchResult] = []
-    for item in raw_results:
-        result = normalize_search_result(item)
-        if not result.url:
-            continue
-        if not _is_candidate_worthy_result(result.title, result.url, result.snippet or ""):
-            continue
-        enriched.append(result)
-    return enriched
+    normalized = normalize_search_results(raw_results)
+    filtered, _ = filter_search_results(normalized)
+    return filtered

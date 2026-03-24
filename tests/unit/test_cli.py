@@ -48,6 +48,12 @@ def test_parse_args_supports_optional_context() -> None:
     parsed = cli._parse_args(["Laura Gómez Martínez", "Lawyer Barcelona"])
     assert parsed.target_name == "Laura Gómez Martínez"
     assert parsed.target_context == "Lawyer Barcelona"
+    assert parsed.debug is False
+
+
+def test_parse_args_supports_debug_flag() -> None:
+    parsed = cli._parse_args(["Laura Gómez Martínez", "Lawyer Barcelona", "--debug"])
+    assert parsed.debug is True
 
 
 @pytest.mark.parametrize(
@@ -142,3 +148,26 @@ def test_main_rejects_blank_target_name(capsys: pytest.CaptureFixture[str]) -> N
 
     assert code == 2
     assert "target_name must not be empty" in captured.err
+
+
+def test_main_debug_prints_pipeline_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    diagnostics = cli.SearchPipelineDiagnostics(
+        raw_results_count=5,
+        normalized_results_count=5,
+        filtered_results_count=3,
+        ranked_candidates_count=3,
+        filter_decisions=(),
+    )
+
+    monkeypatch.setattr(cli, "resolve_query_with_debug", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked(), diagnostics))
+
+    code = cli.main(["Laura Gómez Martínez", "Lawyer Barcelona", "--debug"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "=== Debug: Search pipeline ===" in captured.out
+    assert "Raw results count: 5" in captured.out
+    assert "Filtered results count: 3" in captured.out
