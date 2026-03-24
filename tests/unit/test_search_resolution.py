@@ -148,6 +148,29 @@ def test_snippet_signal_improves_ranking(
     assert ranked[0].result.url == expected_top
 
 
+def test_exact_name_weak_context_does_not_outrank_context_aligned_candidate() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "John Smith",
+                    "url": "https://profiles.example.com/in/john-smith",
+                    "snippet": "Official profile page",
+                },
+                {
+                    "title": "John Smith - Software Engineer",
+                    "url": "https://uk-dev.example.org/in/john-smith-london",
+                    "snippet": "Software engineer based in London building distributed systems",
+                },
+            ]
+        ),
+        "John Smith",
+        ContextQuery(profession="Software Engineer", location="London"),
+    )
+    assert ranked[0].result.url == "https://uk-dev.example.org/in/john-smith-london"
+    assert any("weak_context_exact_name_penalty" in reason for reason in ranked[1].reasons)
+
+
 @pytest.mark.parametrize(
     ("html", "expected_role", "expected_org", "expected_location"),
     [

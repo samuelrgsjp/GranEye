@@ -33,6 +33,23 @@ _FALLBACK_RESULT_LINK_PATTERN = re.compile(
 )
 _TAG_PATTERN = re.compile(r"<[^>]+>")
 _WS_PATTERN = re.compile(r"\s+")
+_SEARCH_ENGINE_HOSTS = {
+    "duckduckgo.com",
+    "links.duckduckgo.com",
+    "google.com",
+    "bing.com",
+    "search.yahoo.com",
+}
+_DDG_INTERNAL_PATH_HINTS = (
+    "/privacy",
+    "/help",
+    "/settings",
+    "/about",
+    "/app",
+    "/bang",
+    "/traffic",
+)
+_PLACEHOLDER_TITLES = {"here", "cached", "feedback", "more results"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -76,7 +93,55 @@ def _is_likely_web_result(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return False
-    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/y.js"):
+    host = parsed.netloc.casefold().removeprefix("www.")
+    if not host:
+        return False
+    if host.endswith("duckduckgo.com") and parsed.path.startswith("/y.js"):
+        return False
+    return True
+
+
+def _is_non_trivial_title(title: str) -> bool:
+    normalized = _WS_PATTERN.sub(" ", title).strip()
+    if len(normalized) < 4:
+        return False
+    lowered = normalized.casefold()
+    if lowered in _PLACEHOLDER_TITLES:
+        return False
+    return len(re.findall(r"[a-zA-ZÀ-ÿ]", normalized)) >= 3
+
+
+def _is_internal_or_search_engine_page(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.casefold().removeprefix("www.")
+    if not host:
+        return True
+
+    if host in _SEARCH_ENGINE_HOSTS:
+        if host.endswith("duckduckgo.com"):
+            if parsed.path == "/l/":
+                return False
+            path = parsed.path.casefold() or "/"
+            if path == "/" or any(path.startswith(prefix) for prefix in _DDG_INTERNAL_PATH_HINTS):
+                return True
+            if parsed.query:
+                return True
+        return True
+
+    return False
+
+
+def _is_candidate_worthy_result(title: str, url: str, snippet: str = "") -> bool:
+    if not _is_likely_web_result(url):
+        return False
+    if _is_internal_or_search_engine_page(url):
+        return False
+    if not _is_non_trivial_title(title):
+        return False
+    if not urlparse(url).netloc:
+        return False
+    text = " ".join(part for part in [title, snippet] if part).casefold()
+    if any(token in text for token in ("duckduckgo", "privacy", "protection", "safe search")):
         return False
     return True
 
@@ -101,7 +166,9 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
         snippet_match = _RESULT_SNIPPET_PATTERN.search(block)
         snippet = _clean_html_text(snippet_match.group(4)) if snippet_match else ""
 
-        if not url or not _is_likely_web_result(url) or url in seen_urls:
+        if not url or url in seen_urls:
+            continue
+        if not _is_candidate_worthy_result(title, url, snippet):
             continue
 
         seen_urls.add(url)
@@ -117,11 +184,10 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
         raw_url = unescape(link_match.group(2).strip())
         url = _resolve_ddg_redirect(raw_url)
         title = _clean_html_text(link_match.group(3))
-        if not title or not url or not _is_likely_web_result(url) or url in seen_urls:
+        if not title or not url or url in seen_urls:
             continue
 
-        lowered_title = title.casefold()
-        if "duckduckgo" in lowered_title or lowered_title in {"cached", "feedback"}:
+        if not _is_candidate_worthy_result(title, url):
             continue
 
         seen_urls.add(url)
@@ -165,13 +231,16 @@ def search_duckduckgo_instant_answer(query: str, *, max_results: int = 10) -> li
 
     abstract_url = str(payload.get("AbstractURL", "")).strip()
     if abstract_url:
-        normalized.append(
-            {
-                "title": str(payload.get("Heading", "")).strip() or query,
-                "url": abstract_url,
-                "snippet": str(payload.get("AbstractText", "")).strip(),
-            }
-        )
+        abstract_title = str(payload.get("Heading", "")).strip() or query
+        abstract_snippet = str(payload.get("AbstractText", "")).strip()
+        if _is_candidate_worthy_result(abstract_title, abstract_url, abstract_snippet):
+            normalized.append(
+                {
+                    "title": abstract_title,
+                    "url": abstract_url,
+                    "snippet": abstract_snippet,
+                }
+            )
 
     def append_topic(item: dict[str, object]) -> None:
         topic_url = str(item.get("FirstURL", "")).strip()
@@ -179,7 +248,8 @@ def search_duckduckgo_instant_answer(query: str, *, max_results: int = 10) -> li
         if not topic_url:
             return
         title = text.split(" - ")[0].strip() if text else ""
-        normalized.append({"title": title, "url": topic_url, "snippet": text})
+        if _is_candidate_worthy_result(title, topic_url, text):
+            normalized.append({"title": title, "url": topic_url, "snippet": text})
 
     for topic in payload.get("RelatedTopics", []):
         if isinstance(topic, dict) and "FirstURL" in topic:
@@ -217,6 +287,8 @@ def enrich_search_results(raw_results: list[Mapping[str, Any]]) -> list[SearchRe
     for item in raw_results:
         result = normalize_search_result(item)
         if not result.url:
+            continue
+        if not _is_candidate_worthy_result(result.title, result.url, result.snippet or ""):
             continue
         enriched.append(result)
     return enriched
