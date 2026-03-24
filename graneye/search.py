@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from html import unescape
 from typing import Any, Mapping
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
 _DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
@@ -25,6 +25,10 @@ _RESULT_LINK_PATTERN = re.compile(
 )
 _RESULT_SNIPPET_PATTERN = re.compile(
     r"<(a|div|span)\b[^>]*\bclass=(['\"])[^'\"]*\b(result__snippet|snippet)\b[^'\"]*\2[^>]*>(.*?)</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_FALLBACK_RESULT_LINK_PATTERN = re.compile(
+    r"<a\b[^>]*\bhref=(['\"])(.*?)\1[^>]*>(.*?)</a>",
     re.IGNORECASE | re.DOTALL,
 )
 _TAG_PATTERN = re.compile(r"<[^>]+>")
@@ -55,6 +59,9 @@ def _clean_html_text(value: str) -> str:
 
 def _resolve_ddg_redirect(url: str) -> str:
     parsed = urlparse(url)
+    if parsed.netloc and "duckduckgo.com" not in parsed.netloc:
+        return url
+
     if parsed.path != "/l/":
         return url
 
@@ -62,13 +69,24 @@ def _resolve_ddg_redirect(url: str) -> str:
     uddg_values = query.get("uddg")
     if not uddg_values:
         return url
-    return unescape(uddg_values[0])
+    return unescape(unquote(uddg_values[0])).strip()
+
+
+def _is_likely_web_result(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/y.js"):
+        return False
+    return True
 
 
 def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[dict[str, str]]:
     """Extract DuckDuckGo HTML results in a resilient way without relying on parser state."""
 
     results: list[dict[str, str]] = []
+
+    seen_urls: set[str] = set()
 
     for block_match in _RESULT_BLOCK_PATTERN.finditer(html):
         block = block_match.group(3)
@@ -83,10 +101,31 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
         snippet_match = _RESULT_SNIPPET_PATTERN.search(block)
         snippet = _clean_html_text(snippet_match.group(4)) if snippet_match else ""
 
-        if not url:
+        if not url or not _is_likely_web_result(url) or url in seen_urls:
             continue
 
+        seen_urls.add(url)
         results.append({"title": title, "url": url, "snippet": snippet})
+        if len(results) >= max_results:
+            break
+
+    if len(results) >= max_results:
+        return results
+
+    # Fallback extraction for HTML layout variants where result wrappers/classes differ.
+    for link_match in _FALLBACK_RESULT_LINK_PATTERN.finditer(html):
+        raw_url = unescape(link_match.group(2).strip())
+        url = _resolve_ddg_redirect(raw_url)
+        title = _clean_html_text(link_match.group(3))
+        if not title or not url or not _is_likely_web_result(url) or url in seen_urls:
+            continue
+
+        lowered_title = title.casefold()
+        if "duckduckgo" in lowered_title or lowered_title in {"cached", "feedback"}:
+            continue
+
+        seen_urls.add(url)
+        results.append({"title": title, "url": url, "snippet": ""})
         if len(results) >= max_results:
             break
 

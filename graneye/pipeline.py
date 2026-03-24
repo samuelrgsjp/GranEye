@@ -56,18 +56,31 @@ def resolve_query(
 
     query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
     raw_results: list[Mapping[str, str]] = []
+    instant_results: list[Mapping[str, str]] = []
     try:
         raw_results = html_search(query_text)
     except Exception:
         raw_results = []
 
-    if not raw_results:
-        try:
-            raw_results = instant_search(query_text)
-        except Exception:
-            raw_results = []
+    try:
+        instant_results = instant_search(query_text)
+    except Exception:
+        instant_results = []
 
-    search_results = enrich_search_results(raw_results)
+    combined_results = [*raw_results]
+    if instant_results:
+        seen = {
+            str(item.get("url") or item.get("link")).strip()
+            for item in raw_results
+            if str(item.get("url") or item.get("link")).strip()
+        }
+        for item in instant_results:
+            url = str(item.get("url") or item.get("link")).strip()
+            if url and url not in seen:
+                combined_results.append(item)
+                seen.add(url)
+
+    search_results = enrich_search_results(combined_results)
     profession, location = _context_parts(context)
     ranked = rank_candidates(
         search_results,
@@ -75,11 +88,14 @@ def resolve_query(
         ContextQuery(profession=profession, location=location),
     )
 
-    resolved = resolve_identity(
-        target_name,
-        search_results,
-        profession=profession,
-        location=location,
-    )
+    try:
+        resolved = resolve_identity(
+            target_name,
+            search_results,
+            profession=profession,
+            location=location,
+        )
+    except Exception:
+        resolved = None
 
     return resolved, ranked

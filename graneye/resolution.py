@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Callable, Iterable, Literal
 from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .detection import is_directory_url
@@ -66,6 +67,8 @@ class ResolutionOutput:
     possible_organization: str | None
     possible_location: str | None
     explanation: str
+    resolution_path: Literal["full_content", "partial_content", "search_only", "fetch_blocked"] = "search_only"
+    fetch_status: str = "not_attempted"
 
 
 def _normalized_tokens(value: str) -> list[str]:
@@ -279,14 +282,26 @@ class _HTMLSignalParser(HTMLParser):
         return " ".join(self._text)
 
 
-def _safe_fetch_html(url: str, timeout: int = 6) -> str:
+def _safe_fetch_html(url: str, timeout: int = 8) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return ""
 
-    request = Request(url, headers={"User-Agent": "GranEye/0.1"})
+    request = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+        },
+    )
     with urlopen(request, timeout=timeout) as response:
-        body = response.read(400_000)
+        body = response.read(450_000)
     return body.decode("utf-8", errors="ignore")
 
 
@@ -294,12 +309,23 @@ def extract_top_candidate_content(
     url: str,
     *,
     fetcher: Callable[[str], str] | None = None,
-) -> TopCandidateContent:
+) -> tuple[TopCandidateContent, str]:
     """Fetch and parse only basic visible content from top candidate."""
 
-    html = (fetcher or _safe_fetch_html)(url)
+    try:
+        html = (fetcher or _safe_fetch_html)(url)
+    except HTTPError as exc:
+        status = f"http_error:{exc.code}"
+        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), status
+    except URLError:
+        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "network_error"
+    except TimeoutError:
+        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "timeout"
+    except Exception:
+        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "fetch_error"
+
     if not html:
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text="")
+        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "empty_response"
 
     parser = _HTMLSignalParser()
     parser.feed(html)
@@ -309,7 +335,7 @@ def extract_top_candidate_content(
         meta_description=parser.meta_description.strip(),
         headings=tuple(parser.headings[:8]),
         main_text=parser.main_text[:2500].strip(),
-    )
+    ), "ok"
 
 
 def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None, str | None, str | None]:
@@ -356,15 +382,25 @@ def resolve_identity(
         return None
 
     top = ranked[0]
-    content = extract_top_candidate_content(top.result.url, fetcher=fetcher)
+    content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
     normalized_name, role, organization, inferred_location = infer_profile_signals(content)
 
     same_person_probability = min(1.0, top.score * {"full_match": 1.0, "reordered_match": 0.9, "partial_match": 0.7, "weak_match": 0.4}[top.name_match])
     context_probability = min(1.0, top.context_strength + (0.15 if role or organization or inferred_location else 0.0))
 
+    if fetch_status == "ok":
+        if content.main_text or content.meta_description:
+            resolution_path: Literal["full_content", "partial_content", "search_only", "fetch_blocked"] = "full_content"
+        else:
+            resolution_path = "partial_content"
+    elif fetch_status.startswith("http_error:"):
+        resolution_path = "fetch_blocked"
+    else:
+        resolution_path = "search_only"
+
     explanation = (
         f"Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
-        f"signals: {', '.join(top.reasons[:5])}"
+        f"signals: {', '.join(top.reasons[:5])}; path={resolution_path}; fetch={fetch_status}"
     )
 
     return ResolutionOutput(
@@ -377,5 +413,7 @@ def resolve_identity(
         possible_role=role,
         possible_organization=organization,
         possible_location=inferred_location,
+        resolution_path=resolution_path,
+        fetch_status=fetch_status,
         explanation=explanation,
     )

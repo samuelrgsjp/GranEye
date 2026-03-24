@@ -73,6 +73,7 @@ def test_main_prints_candidate_output(
     assert expected_text in captured.out
     assert "Source URL:" in captured.out
     assert "Score:" in captured.out
+    assert "Resolution path:" in captured.out
     assert "Decision reason:" in captured.out
 
 
@@ -87,6 +88,20 @@ def test_main_returns_not_found_when_no_candidates(
 
     assert code == 3
     assert "No candidates found" in captured.out
+
+
+def test_main_falls_back_to_search_only_when_resolution_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (None, _fake_ranked()))
+
+    code = cli.main(["Laura Gómez Martínez"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Top candidate (search-only):" in captured.out
+    assert "using ranked search evidence only" in captured.out
 
 
 def test_main_handles_runtime_failure(
