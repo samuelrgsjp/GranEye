@@ -17,13 +17,28 @@ GranEye is a modular Python OSINT prototype with deterministic analysis and iden
 python -m pytest
 ```
 
+## CLI Usage
+
+After installing (`pip install -e .`), run either form:
+
+```bash
+graneye "Laura Gómez Martínez" "Lawyer Barcelona"
+python -m graneye "Laura Gómez Martínez" "Lawyer Barcelona"
+```
+
+Notes:
+- `target_name` is required.
+- `target_context` is optional and can improve disambiguation.
+- Use `graneye --help` for argument details.
+
 ## Package Layout
 
 - `graneye/analyzers/base.py`: analyzer contracts and future local analyzer backend interface.
 - `graneye/analyzers/rule_based.py`: existing rule-based analyzer implementation.
 - `graneye/clustering.py`: deterministic identity clustering.
+- `graneye/cli.py`: command-line entrypoint and output rendering.
 - `graneye/detection.py`: directory vs profile URL classification.
 - `graneye/extraction.py`: candidate name extraction utilities.
-- `graneye/pipeline.py`: composition helpers for analysis and clustering.
+- `graneye/pipeline.py`: composition helpers for analysis, clustering, and query resolution orchestration.
 - `graneye/search.py`: normalization/enrichment for raw search results.
 - `graneye/resolution.py`: candidate ranking, scoring rationale, top-page extraction, and structured output.

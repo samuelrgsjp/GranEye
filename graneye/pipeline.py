@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from .analyzers.base import Analyzer
 from .clustering import cluster_identities
 from .detection import is_directory_url
 from .models import AnalysisResult, IdentityCluster, ProfileRecord
+from .resolution import ContextQuery, ResolutionOutput, ScoredCandidate, rank_candidates, resolve_identity
+from .search import SearchResult, enrich_search_results
 
 
 def analyze_records(
@@ -26,3 +28,58 @@ def cluster_records(records: Iterable[ProfileRecord]) -> list[IdentityCluster]:
     """Public clustering façade kept separate for testability."""
 
     return cluster_identities(records)
+
+
+def _context_parts(context: str | None) -> tuple[str | None, str | None]:
+    if context is None:
+        return None, None
+
+    normalized = context.strip()
+    if not normalized:
+        return None, None
+
+    if "," in normalized:
+        profession, location = [part.strip() for part in normalized.split(",", 1)]
+        return profession or None, location or None
+
+    return normalized, None
+
+
+def resolve_query(
+    target_name: str,
+    *,
+    context: str | None,
+    html_search: Callable[[str], list[Mapping[str, str]]],
+    instant_search: Callable[[str], list[Mapping[str, str]]],
+) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
+    """End-to-end deterministic orchestration from query to ranked candidate output."""
+
+    query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
+    raw_results: list[Mapping[str, str]] = []
+    try:
+        raw_results = html_search(query_text)
+    except Exception:
+        raw_results = []
+
+    if not raw_results:
+        try:
+            raw_results = instant_search(query_text)
+        except Exception:
+            raw_results = []
+
+    search_results = enrich_search_results(raw_results)
+    profession, location = _context_parts(context)
+    ranked = rank_candidates(
+        search_results,
+        target_name,
+        ContextQuery(profession=profession, location=location),
+    )
+
+    resolved = resolve_identity(
+        target_name,
+        search_results,
+        profession=profession,
+        location=location,
+    )
+
+    return resolved, ranked
