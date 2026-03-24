@@ -26,6 +26,16 @@ SAMPLE_DDG_HTML = """
 </html>
 """
 
+SAMPLE_DDG_HTML_FALLBACK = """
+<html>
+  <body>
+    <div class="links_main links_deep result__body">
+      <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fin%2Fjane-doe">Jane Doe profile</a>
+    </div>
+  </body>
+</html>
+"""
+
 
 class _FakeResponse(io.BytesIO):
     def __enter__(self) -> "_FakeResponse":
@@ -84,3 +94,9 @@ def test_search_duckduckgo_instant_answer_normalizes_topics(monkeypatch) -> None
     assert len(results) == 2
     assert results[0]["url"] == "https://en.wikipedia.org/wiki/Satya_Nadella"
     assert results[1]["title"] == "Satya Nadella"
+
+
+def test_parse_duckduckgo_html_results_has_fallback_link_extraction() -> None:
+    results = search.parse_duckduckgo_html_results(SAMPLE_DDG_HTML_FALLBACK, max_results=10)
+    assert results
+    assert results[0]["url"] == "https://example.com/in/jane-doe"

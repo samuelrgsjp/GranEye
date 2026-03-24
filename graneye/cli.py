@@ -44,6 +44,8 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
         f"Score: {output.final_score:.3f}",
         f"Same-person probability: {output.same_person_probability:.3f}",
         f"Context match probability: {output.context_match_probability:.3f}",
+        f"Resolution path: {output.resolution_path}",
+        f"Fetch status: {output.fetch_status}",
         f"Decision reason: {output.explanation}",
     ]
     return "\n".join(lines)
@@ -69,9 +71,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
         return 1
 
-    if output is None or not ranked:
+    if not ranked:
         print(f"No candidates found for '{args.target_name.strip()}'.")
         return 3
+
+    if output is None:
+        top = ranked[0]
+        print(
+            "\n".join(
+                [
+                    f"Target name: {args.target_name.strip()}",
+                    f"Target context: {context}" if context else "Target context: (none)",
+                    f"Top candidate (search-only): {top.result.title or top.result.domain}",
+                    f"Source URL: {top.result.url}",
+                    f"Score: {top.score:.3f}",
+                    "Decision reason: content fetch failed; using ranked search evidence only.",
+                ]
+            )
+        )
+        return 0
 
     print(_render_output(args.target_name.strip(), context, output, ranked[0].result))
     return 0

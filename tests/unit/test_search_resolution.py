@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from urllib.error import HTTPError
 
 from graneye.resolution import (
     ContextQuery,
@@ -180,3 +181,27 @@ def test_top_candidate_extraction(html: str, expected_role: str, expected_org: s
     assert output.possible_organization == expected_org
     assert output.possible_location == expected_location
     assert output.entity_type == "person_profile"
+    assert output.resolution_path == "full_content"
+    assert output.fetch_status == "ok"
+
+
+def test_resolve_identity_falls_back_when_fetch_is_blocked() -> None:
+    results = enrich_search_results(
+        [
+            {
+                "title": "Jane Doe - LinkedIn",
+                "url": "https://www.linkedin.com/in/jane-doe",
+                "snippet": "Security engineer in Austin",
+            }
+        ]
+    )
+
+    def _blocked(_url: str) -> str:
+        raise HTTPError(url=_url, code=999, msg="blocked", hdrs=None, fp=None)
+
+    output = resolve_identity("Jane Doe", results, fetcher=_blocked)
+
+    assert output is not None
+    assert output.resolution_path == "fetch_blocked"
+    assert output.fetch_status == "http_error:999"
+    assert output.source_url == "https://www.linkedin.com/in/jane-doe"

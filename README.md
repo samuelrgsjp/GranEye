@@ -10,6 +10,7 @@ GranEye is a modular Python OSINT prototype with deterministic analysis and iden
 - Identity clustering based on normalized names/handles.
 - Evidence-driven candidate ranking using title/snippet/URL signals.
 - Top-candidate page extraction with lightweight rule-based profile inference.
+- Graceful fallback paths when target pages block scraping (for example HTTP 999).
 
 ## Quick Start
 
@@ -30,6 +31,18 @@ Notes:
 - `target_name` is required.
 - `target_context` is optional and can improve disambiguation.
 - Use `graneye --help` for argument details.
+- CLI output includes `Resolution path` (`full_content`, `partial_content`, `search_only`, or `fetch_blocked`) and `Fetch status`.
+
+## Reliability Behavior
+
+GranEye uses layered fallback so a blocked page fetch does not invalidate ranking:
+
+1. Query DuckDuckGo HTML endpoint, then supplement with Instant Answer topics.
+2. Rank all normalized results using deterministic identity/context signals.
+3. Attempt to fetch the top candidate page for enrichment.
+4. If fetching fails or is blocked, keep ranked search evidence and return a search-grounded result instead of failing the full pipeline.
+
+This means output can still be meaningful even when a website denies bot-like requests.
 
 ## Package Layout
 
