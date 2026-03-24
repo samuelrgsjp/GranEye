@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import io
+import json
+from urllib.parse import quote_plus
+
+from graneye import search
+
+
+SAMPLE_DDG_HTML = """
+<html>
+  <body>
+    <article class="result result--web">
+      <h2 class="result__title">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fes.linkedin.com%2Fin%2Flaura-gomez-martinez">
+          Laura Gómez Martínez - LinkedIn
+        </a>
+      </h2>
+      <div class="result__snippet">Lawyer in Barcelona at Lex Group.</div>
+    </article>
+    <article class="result result--web">
+      <h2><a class="result__a" href="https://example.org/profile">Laura Gómez bio</a></h2>
+      <a class="result__snippet">Public profile page in Spain</a>
+    </article>
+  </body>
+</html>
+"""
+
+
+class _FakeResponse(io.BytesIO):
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def test_parse_duckduckgo_html_results_extracts_title_url_and_snippet() -> None:
+    results = search.parse_duckduckgo_html_results(SAMPLE_DDG_HTML, max_results=10)
+
+    assert len(results) == 2
+    assert results[0]["title"] == "Laura Gómez Martínez - LinkedIn"
+    assert results[0]["url"] == "https://es.linkedin.com/in/laura-gomez-martinez"
+    assert "Lawyer in Barcelona" in results[0]["snippet"]
+    assert results[1]["url"] == "https://example.org/profile"
+
+
+def test_search_duckduckgo_html_uses_html_endpoint_and_headers(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def _fake_urlopen(request, timeout: int = 10):
+        captured["url"] = request.full_url
+        captured["ua"] = request.headers.get("User-agent", "")
+        captured["accept"] = request.headers.get("Accept", "")
+        assert timeout == 10
+        return _FakeResponse(SAMPLE_DDG_HTML.encode("utf-8"))
+
+    monkeypatch.setattr(search, "urlopen", _fake_urlopen)
+
+    results = search.search_duckduckgo_html("Satya Nadella Microsoft CEO", max_results=1)
+
+    assert results
+    assert captured["url"] == f"https://html.duckduckgo.com/html/?q={quote_plus('Satya Nadella Microsoft CEO')}"
+    assert "Mozilla/5.0" in captured["ua"]
+    assert "text/html" in captured["accept"]
+
+
+def test_search_duckduckgo_instant_answer_normalizes_topics(monkeypatch) -> None:
+    payload = {
+        "Heading": "Satya Nadella",
+        "AbstractURL": "https://en.wikipedia.org/wiki/Satya_Nadella",
+        "AbstractText": "CEO of Microsoft",
+        "RelatedTopics": [{"Text": "Satya Nadella - Biography", "FirstURL": "https://example.com/satya"}],
+    }
+
+    def _fake_urlopen(_request, timeout: int = 10):
+        assert timeout == 10
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(search, "urlopen", _fake_urlopen)
+
+    results = search.search_duckduckgo_instant_answer("Satya Nadella", max_results=5)
+
+    assert len(results) == 2
+    assert results[0]["url"] == "https://en.wikipedia.org/wiki/Satya_Nadella"
+    assert results[1]["title"] == "Satya Nadella"
