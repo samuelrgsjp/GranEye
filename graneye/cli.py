@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .pipeline import resolve_query
+from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
 from .resolution import ResolutionOutput
 from .search import SearchResult, search_duckduckgo_html, search_duckduckgo_instant_answer
 
@@ -11,6 +11,7 @@ from .search import SearchResult, search_duckduckgo_html, search_duckduckgo_inst
 class CLIArgs(argparse.Namespace):
     target_name: str
     target_context: str | None
+    debug: bool
 
 
 def _parse_args(argv: list[str] | None = None) -> CLIArgs:
@@ -24,6 +25,11 @@ def _parse_args(argv: list[str] | None = None) -> CLIArgs:
         nargs="?",
         default=None,
         help="Optional disambiguation context (for example: 'Lawyer Barcelona')",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show search pipeline diagnostics and per-result filter decisions.",
     )
 
     namespace = parser.parse_args(argv, namespace=CLIArgs())
@@ -60,16 +66,28 @@ def main(argv: list[str] | None = None) -> int:
 
     context = args.target_context.strip() if args.target_context else None
 
+    diagnostics: SearchPipelineDiagnostics | None = None
     try:
-        output, ranked = resolve_query(
-            args.target_name.strip(),
-            context=context,
-            html_search=search_duckduckgo_html,
-            instant_search=search_duckduckgo_instant_answer,
-        )
+        if args.debug:
+            output, ranked, diagnostics = resolve_query_with_debug(
+                args.target_name.strip(),
+                context=context,
+                html_search=search_duckduckgo_html,
+                instant_search=search_duckduckgo_instant_answer,
+            )
+        else:
+            output, ranked = resolve_query(
+                args.target_name.strip(),
+                context=context,
+                html_search=search_duckduckgo_html,
+                instant_search=search_duckduckgo_instant_answer,
+            )
     except Exception as exc:  # pragma: no cover - defensive path
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
         return 1
+
+    if args.debug and diagnostics is not None:
+        print(_render_debug_output(diagnostics))
 
     if not ranked:
         print(f"No candidates found for '{args.target_name.strip()}'.")
@@ -93,6 +111,29 @@ def main(argv: list[str] | None = None) -> int:
 
     print(_render_output(args.target_name.strip(), context, output, ranked[0].result))
     return 0
+
+
+def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
+    lines = [
+        "=== Debug: Search pipeline ===",
+        f"Raw results count: {diagnostics.raw_results_count}",
+        f"Normalized results count: {diagnostics.normalized_results_count}",
+        f"Filtered results count: {diagnostics.filtered_results_count}",
+        f"Ranked candidates count: {diagnostics.ranked_candidates_count}",
+        "Per-result decisions:",
+    ]
+    for idx, decision in enumerate(diagnostics.filter_decisions, start=1):
+        result = decision.result
+        snippet_flag = "yes" if result.snippet and result.snippet.strip() else "no"
+        status = "kept" if decision.accepted else "dropped"
+        lines.append(
+            (
+                f"{idx:02d}. [{status}] title={result.title or '(empty)'} | "
+                f"url={result.url or '(empty)'} | domain={result.domain or '(empty)'} | "
+                f"snippet={snippet_flag} | reason={decision.reason}"
+            )
+        )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
