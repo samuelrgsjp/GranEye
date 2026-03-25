@@ -304,8 +304,8 @@ def test_ambiguous_common_name_sets_multiple_plausible_reason() -> None:
         location="London",
     )
     assert output is not None
-    assert output.ambiguity_detected is True
-    assert output.ambiguity_reason == "multiple_plausible_candidates"
+    assert output.ambiguity_detected is False
+    assert output.ambiguity_reason is None
     assert output.no_resolution is True
 
 
@@ -803,6 +803,49 @@ def test_single_wikipedia_result_does_not_get_high_confidence() -> None:
 
 
 @pytest.mark.parametrize(
+    ("query", "context_kwargs", "raw_result"),
+    [
+        (
+            "Lionel Messi",
+            {"domain_activity": "football", "location": "argentina"},
+            {
+                "title": "Lionel Messi - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/Lionel_Messi",
+                "snippet": "Argentine professional footballer.",
+            },
+        ),
+        (
+            "MrBeast",
+            {"media_platform": "youtube"},
+            {
+                "title": "MrBeast - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/MrBeast",
+                "snippet": "American YouTuber known for challenge videos and philanthropy.",
+            },
+        ),
+        (
+            "Taylor Swift",
+            {"role": "singer", "domain_activity": "music", "location": "usa"},
+            {
+                "title": "Taylor Swift - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/Taylor_Swift",
+                "snippet": "American singer-songwriter.",
+            },
+        ),
+    ],
+)
+def test_distinctive_public_identities_get_at_least_medium_confidence_with_strong_encyclopedic_evidence(
+    query: str,
+    context_kwargs: dict[str, str],
+    raw_result: dict[str, str],
+) -> None:
+    output = resolve_identity(query, enrich_search_results([raw_result]), **context_kwargs)
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.confidence_label in {"medium", "high"}
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "https://www.vatican.va/content/francesco/en/biography/documents/papa-francesco_20130313_biografia-bergoglio.html",
@@ -817,6 +860,66 @@ def test_non_corporate_official_domains_are_typed_strongly(url: str) -> None:
         ContextQuery(institutional_hint="vatican"),
     )
     assert ranked[0].authority_tier == "official_institutional"
+
+
+def test_common_name_diffuse_cybersecurity_matches_do_not_force_multiple_plausible_reason() -> None:
+    output = resolve_identity(
+        "Carlos Pérez",
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez | LinkedIn",
+                    "url": "https://www.linkedin.com/in/carlos-perez-security",
+                    "snippet": "Cybersecurity professional in Spain.",
+                },
+                {
+                    "title": "Carlos Perez - Security Consultant",
+                    "url": "https://profiles.example.com/in/carlos-perez",
+                    "snippet": "Consultant profile in Spain.",
+                },
+                {
+                    "title": "Carlos Pérez speaker profile",
+                    "url": "https://events.example.org/speakers/carlos-perez",
+                    "snippet": "Cybersecurity conference speaker.",
+                },
+            ]
+        ),
+        domain_activity="cybersecurity",
+        location="spain",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+    assert output.no_resolution_reason in {"common_name_weak_context", "insufficient_identity_specific_support"}
+    assert output.ambiguity_reason != "multiple_plausible_candidates"
+
+
+def test_common_name_diffuse_software_engineer_madrid_stays_no_resolution() -> None:
+    output = resolve_identity(
+        "David Martínez",
+        enrich_search_results(
+            [
+                {
+                    "title": "David Martínez | LinkedIn",
+                    "url": "https://www.linkedin.com/in/david-martinez",
+                    "snippet": "Software engineer in Madrid.",
+                },
+                {
+                    "title": "David Martinez - Developer",
+                    "url": "https://profiles.example.com/in/dmartinez",
+                    "snippet": "Software developer profile in Madrid.",
+                },
+                {
+                    "title": "David Martinez GitHub",
+                    "url": "https://github.com/dmartinez",
+                    "snippet": "Software projects and repositories.",
+                },
+            ]
+        ),
+        role="software engineer",
+        location="madrid",
+    )
+    assert output is not None
+    assert output.no_resolution is True
 
 
 def test_creator_multi_channel_ecosystem_not_marked_ambiguous() -> None:

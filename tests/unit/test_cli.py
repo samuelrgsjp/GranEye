@@ -35,6 +35,7 @@ def _fake_output(url: str = "https://example.com/in/laura") -> ResolutionOutput:
     return ResolutionOutput(
         normalized_candidate_name="laura gomez martinez",
         source_url=url,
+        source_title="Laura Gómez Martínez - Lawyer",
         final_score=0.92,
         entity_type="person_profile",
         same_person_probability=0.92,
@@ -177,3 +178,31 @@ def test_main_debug_prints_pipeline_counts(
     assert "Raw results count: 5" in captured.out
     assert "Filtered results count: 3" in captured.out
     assert "Ranked candidates:" in captured.out
+
+
+def test_main_uses_selected_representative_title_not_ranked_first_title(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _fake_output("https://www.nvidia.com/en-us/about-nvidia/jensen-huang/")
+    output = ResolutionOutput(
+        normalized_candidate_name=output.normalized_candidate_name,
+        source_url=output.source_url,
+        source_title="Jensen Huang - Founder and CEO",
+        final_score=output.final_score,
+        entity_type=output.entity_type,
+        same_person_probability=output.same_person_probability,
+        context_match_probability=output.context_match_probability,
+        possible_role=output.possible_role,
+        possible_organization=output.possible_organization,
+        possible_location=output.possible_location,
+        explanation=output.explanation,
+    )
+    ranked = _fake_ranked("https://business-news-today.example.com/about-nvidia")
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, ranked))
+
+    code = cli.main(["Jensen Huang", "NVIDIA CEO"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "Display title: Jensen Huang - Founder and CEO" in captured.out

@@ -391,6 +391,8 @@ def resolve_query(
     except Exception:
         resolved = None
 
+    if resolved is not None:
+        ranked = _align_ranked_with_resolution(ranked, resolved)
     return resolved, ranked
 
 
@@ -432,6 +434,9 @@ def resolve_query_with_debug(
     except Exception:
         resolved = None
 
+    if resolved is not None:
+        ranked = _align_ranked_with_resolution(ranked, resolved)
+
     diagnostics = SearchPipelineDiagnostics(
         raw_results_count=len(combined_results),
         normalized_results_count=len(normalized_results),
@@ -452,3 +457,14 @@ def resolve_query_with_debug(
         query_validity=assess_query_validity(target_name).status,
     )
     return resolved, ranked, diagnostics
+
+
+def _align_ranked_with_resolution(ranked: list[ScoredCandidate], resolved: ResolutionOutput) -> list[ScoredCandidate]:
+    if not ranked or not resolved.source_url:
+        return ranked
+    for idx, candidate in enumerate(ranked):
+        if candidate.result.url == resolved.source_url:
+            if idx == 0:
+                return ranked
+            return [candidate, *ranked[:idx], *ranked[idx + 1 :]]
+    return ranked

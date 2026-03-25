@@ -105,6 +105,32 @@ def test_resolve_query_with_debug_high_signal_instant_fallback_has_candidates() 
     assert ranked[0].context_strength > 0
 
 
+def test_resolve_query_aligns_ranked_top_with_selected_representative() -> None:
+    html_results = [
+        {
+            "title": "Jensen Huang discusses AI demand",
+            "url": "https://apnews.com/article/jensen-huang-ai",
+            "snippet": "AP coverage of NVIDIA CEO Jensen Huang.",
+        },
+        {
+            "title": "NVIDIA Leadership",
+            "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/",
+            "snippet": "Founder, President and CEO Jensen Huang.",
+        },
+    ]
+    output, ranked, diagnostics = resolve_query_with_debug(
+        "Jensen Huang",
+        context="NVIDIA CEO",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: [],
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.source_url.startswith("https://www.nvidia.com/")
+    assert ranked[0].result.url == output.source_url
+    assert diagnostics.ranked_candidates[0].result.url == output.source_url
+
+
 def test_resolve_query_with_debug_reports_ambiguity_when_candidates_are_close() -> None:
     html_results = [
         {"title": "John Smith - Engineer", "url": "https://a.example.com/john-smith", "snippet": "Engineer in London"},
@@ -117,8 +143,9 @@ def test_resolve_query_with_debug_reports_ambiguity_when_candidates_are_close() 
         instant_search=lambda _q: [],
     )
     assert output is not None
-    assert output.ambiguity_detected is True
-    assert diagnostics.ambiguity_triggered is True
+    assert output.ambiguity_detected is False
+    assert diagnostics.ambiguity_triggered is False
+    assert output.no_resolution is True
 
 
 def test_parse_context_supports_public_creator_hints() -> None:

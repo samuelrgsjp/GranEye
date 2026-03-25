@@ -230,6 +230,7 @@ class ResolutionOutput:
 
     normalized_candidate_name: str
     source_url: str
+    source_title: str
     final_score: float
     entity_type: EntityType
     same_person_probability: float
@@ -924,6 +925,26 @@ def _query_distinctiveness(query_name: str) -> float:
     return max(0.0, min(0.9, score))
 
 
+def _common_name_pattern(query_name: str) -> bool:
+    tokens = _normalized_tokens(query_name)
+    if not tokens:
+        return False
+    common_hits = sum(1 for token in tokens if token in _COMMON_NAME_TOKENS)
+    return common_hits >= 2 or (common_hits >= 1 and len(tokens) <= 2)
+
+
+def _cluster_is_plausible_identity(cluster: IdentityClusterEvidence) -> bool:
+    representative = cluster.representative
+    return (
+        cluster.aggregate_score >= 0.66
+        and representative.context_strength >= 0.22
+        and (cluster.strong_source_count >= 2 or representative.authority_tier in {"official_institutional", "strong_encyclopedic"})
+        and representative.name_match in {"full_match", "reordered_match", "partial_match"}
+        and representative.entity_type not in {"directory_listing", "aggregator_profile", "generic_article", "unknown"}
+        and representative.authority_tier not in {"directory_aggregator", "low_authority_bio_seo", "junk_or_malformed"}
+    )
+
+
 def _entity_typing_confidence(entity_type: EntityType, reasons: tuple[str, ...]) -> float:
     if entity_type == "unknown":
         return 0.2
@@ -1221,6 +1242,7 @@ def resolve_identity(
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
+            source_title="",
             final_score=0.0,
             entity_type="unknown",
             same_person_probability=0.0,
@@ -1288,7 +1310,7 @@ def resolve_identity(
         or top.entity_type in {"unknown", "generic_article", "aggregator_profile", "directory_listing"}
         or top.authority_tier in {"directory_aggregator", "low_authority_bio_seo", "junk_or_malformed"}
     )
-    close_competition = second_cluster is not None and score_gap < 0.1 and second_cluster.aggregate_score > 0.44
+    close_competition = second_cluster is not None and score_gap < 0.16 and second_cluster.aggregate_score > 0.5
     common_name_competition = (
         not has_context_constraints
         and second is not None
@@ -1321,7 +1343,12 @@ def resolve_identity(
         distinctiveness += 0.08
     distinctiveness = min(1.0, distinctiveness)
     evidence_strength += min(0.16, 0.18 * distinctiveness)
-    ambiguity_detected = close_competition or common_name_competition
+    plausible_competition = bool(
+        second_cluster
+        and _cluster_is_plausible_identity(winning_cluster)
+        and _cluster_is_plausible_identity(second_cluster)
+    )
+    ambiguity_detected = (close_competition and plausible_competition) or (common_name_competition and plausible_competition)
     ambiguity_reason = "multiple_plausible_candidates" if ambiguity_detected else None
     if second is not None and top.authority_tier == "official_institutional":
         authority_order = {
@@ -1340,6 +1367,13 @@ def resolve_identity(
         ):
             ambiguity_detected = False
             ambiguity_reason = None
+    if (
+        _common_name_pattern(query_name)
+        and top.authority_tier not in {"official_institutional", "strong_encyclopedic"}
+        and winning_cluster.strong_source_count <= 1
+    ):
+        ambiguity_detected = False
+        ambiguity_reason = None
 
     strong_top_profile = (
         winning_cluster.aggregate_score >= 0.62
@@ -1357,6 +1391,14 @@ def resolve_identity(
         and distinctiveness >= 0.45
     )
     insufficient_evidence = (evidence_strength < 0.56 and not strong_top_profile) or weak_top_evidence
+    common_name_guardrail = (
+        _common_name_pattern(query_name)
+        and top.authority_tier not in {"official_institutional", "strong_encyclopedic"}
+        and winning_cluster.strong_source_count <= 1
+        and (winning_cluster.independent_domains <= 1 or (second_cluster is not None and score_gap < 0.22))
+    )
+    if common_name_guardrail:
+        insufficient_evidence = True
     if strong_single_source_resolution and weak_top_evidence is False:
         insufficient_evidence = False
     confidence_label: Literal["high", "medium", "low"] = "high"
@@ -1410,6 +1452,23 @@ def resolve_identity(
         else:
             confidence_label = "low"
 
+    distinctive_single_source_identity = (
+        top.name_match in {"full_match", "reordered_match"}
+        and (
+            canonical_name_quality >= 0.6
+            or distinctiveness >= 0.72
+            or (context.media_platform is not None and top.context_strength >= 0.18)
+        )
+        and top.authority_tier in {"strong_encyclopedic", "official_institutional"}
+        and top.entity_type in {"reference_entry", "official_bio", "official_profile", "person_profile", "institutional_profile"}
+        and (top.context_strength >= 0.12 or distinctiveness >= 0.62)
+        and not _common_name_pattern(query_name)
+        and not (second_cluster is not None and _cluster_is_plausible_identity(second_cluster) and score_gap < 0.14)
+    )
+    if distinctive_single_source_identity and confidence_label == "low":
+        confidence_label = "medium"
+        insufficient_evidence = False
+
     wikipedia_fallback_without_context = (
         top.result.domain.endswith("wikipedia.org")
         and top.context_strength < 0.2
@@ -1421,6 +1480,7 @@ def resolve_identity(
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
+            source_title="",
             final_score=winning_cluster.aggregate_score,
             entity_type=top.entity_type,
             same_person_probability=0.0,
@@ -1451,6 +1511,7 @@ def resolve_identity(
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
+            source_title="",
             final_score=winning_cluster.aggregate_score,
             entity_type=top.entity_type,
             same_person_probability=same_person_probability,
@@ -1468,10 +1529,47 @@ def resolve_identity(
             no_resolution_reason="common_name_structured_profile_without_corroboration",
         )
 
+    common_name_weak_context = (
+        _common_name_pattern(query_name)
+        and top.context_strength < 0.45
+        and winning_cluster.strong_source_count <= 1
+        and winning_cluster.independent_domains <= 2
+    )
+    diffuse_low_specificity_matches = (
+        source_diversity >= 3
+        and winning_cluster.aggregate_score < 0.62
+        and winning_cluster.strong_source_count <= 1
+        and top.name_match != "full_match"
+    )
+
     if insufficient_evidence and not ambiguity_detected:
+        no_resolution_reason = "insufficient_evidence"
+        no_resolution_explanation = (
+            "NO_RESOLUTION: insufficient absolute evidence for unique identity; "
+            f"score={top.score:.3f}; evidence={evidence_strength:.3f}; canonical_name_quality={canonical_name_quality:.2f}"
+        )
+        if common_name_weak_context:
+            no_resolution_reason = "common_name_weak_context"
+            no_resolution_explanation = (
+                "NO_RESOLUTION: common-name weak-context evidence without identity-specific support; "
+                f"score={top.score:.3f}; context={top.context_strength:.3f}; cluster_domains={winning_cluster.independent_domains}"
+            )
+        elif common_name_guardrail:
+            no_resolution_reason = "insufficient_identity_specific_support"
+            no_resolution_explanation = (
+                "NO_RESOLUTION: common-name query has only low-specificity profile evidence without corroboration; "
+                f"score={top.score:.3f}; score_gap={score_gap:.3f}; strong_sources={winning_cluster.strong_source_count}"
+            )
+        elif diffuse_low_specificity_matches:
+            no_resolution_reason = "insufficient_identity_specific_support"
+            no_resolution_explanation = (
+                "NO_RESOLUTION: weak context with many low-specificity matches and no clear identity anchor; "
+                f"score={top.score:.3f}; diversity={source_diversity}; evidence={evidence_strength:.3f}"
+            )
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
+            source_title="",
             final_score=winning_cluster.aggregate_score,
             entity_type=top.entity_type,
             same_person_probability=same_person_probability,
@@ -1479,17 +1577,14 @@ def resolve_identity(
             possible_role=role,
             possible_organization=organization,
             possible_location=inferred_location,
-            explanation=(
-                "NO_RESOLUTION: insufficient absolute evidence for unique identity; "
-                f"score={top.score:.3f}; evidence={evidence_strength:.3f}; canonical_name_quality={canonical_name_quality:.2f}"
-            ),
+            explanation=no_resolution_explanation,
             resolution_path=resolution_path,
             fetch_status=fetch_status,
             confidence_label="low",
             ambiguity_detected=False,
             ambiguity_reason=None,
             no_resolution=True,
-            no_resolution_reason="insufficient_evidence",
+            no_resolution_reason=no_resolution_reason,
         )
 
     prefix = "AMBIGUOUS: " if ambiguity_detected else ""
@@ -1511,6 +1606,7 @@ def resolve_identity(
     return ResolutionOutput(
         normalized_candidate_name=normalized_name or normalize_name(query_name),
         source_url=top.result.url,
+        source_title=top.result.title,
         final_score=top.score,
         entity_type=top.entity_type,
         same_person_probability=same_person_probability,

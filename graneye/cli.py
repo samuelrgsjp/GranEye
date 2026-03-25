@@ -5,7 +5,7 @@ import sys
 
 from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
 from .resolution import ResolutionOutput
-from .search import SearchResult, search_duckduckgo_html, search_duckduckgo_instant_answer
+from .search import search_duckduckgo_html, search_duckduckgo_instant_answer
 
 
 class CLIArgs(argparse.Namespace):
@@ -40,7 +40,7 @@ def _is_blank(value: str | None) -> bool:
     return value is None or not value.strip()
 
 
-def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput, top: SearchResult) -> str:
+def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
     if output.no_resolution:
         lines = [
             f"Target name: {target_name}",
@@ -57,7 +57,7 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
         f"Target context: {target_context}" if target_context else "Target context: (none)",
         f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
         f"Source URL: {output.source_url}",
-        f"Display title: {top.title or '(not available)'}",
+        f"Display title: {output.source_title or '(not available)'}",
         f"Score: {output.final_score:.3f}",
         f"Same-person probability: {output.same_person_probability:.3f}",
         f"Context match probability: {output.context_match_probability:.3f}",
@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    print(_render_output(args.target_name.strip(), context, output, ranked[0].result))
+    print(_render_output(args.target_name.strip(), context, output))
     return 0
 
 
