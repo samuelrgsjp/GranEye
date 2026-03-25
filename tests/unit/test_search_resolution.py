@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import pytest
 from urllib.error import HTTPError
 
@@ -1091,3 +1092,103 @@ def test_source_diversity_not_required_when_single_official_source_is_strong() -
     assert output is not None
     assert output.no_resolution is False
     assert output.source_url == "https://www.microsoft.com/en-us/about/leadership/satya-nadella"
+
+
+def test_representative_surface_fields_stay_aligned_for_jensen_huang() -> None:
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang keynote at NVIDIA GTC",
+                    "url": "https://www.nvidia.com/en-us/events/gtc/keynote/",
+                    "snippet": "Watch NVIDIA CEO Jensen Huang's keynote.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA biography for founder and CEO Jensen Huang.",
+                },
+            ]
+        ),
+        role="CEO",
+        organization="NVIDIA",
+        fetcher=lambda _url: """
+            <html>
+              <head>
+                <title>About NVIDIA | Leadership</title>
+                <meta property='og:title' content='About NVIDIA'>
+              </head>
+              <body>
+                <h1>Jensen Huang</h1>
+                <p>Founder and CEO of NVIDIA.</p>
+              </body>
+            </html>
+        """,
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.source_url == "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/"
+    assert output.normalized_candidate_name == "jensen huang"
+    assert output.normalized_candidate_name != "about nvidia"
+
+
+def test_canonical_name_extraction_rejects_about_nvidia_fragment() -> None:
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA biography.",
+                }
+            ]
+        ),
+        role="CEO",
+        organization="NVIDIA",
+        fetcher=lambda _url: """
+            <html>
+              <head>
+                <title>About NVIDIA | Jensen Huang</title>
+                <meta property='og:title' content='About NVIDIA'>
+              </head>
+              <body><h1>Jensen Huang</h1></body>
+            </html>
+        """,
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert "canonical_name_source=og_title" not in output.explanation
+    assert output.normalized_candidate_name == "jensen huang"
+
+
+def test_mrbeast_single_token_identity_gets_stronger_canonical_quality() -> None:
+    output = resolve_identity(
+        "MrBeast",
+        enrich_search_results(
+            [
+                {
+                    "title": "MrBeast - YouTube",
+                    "url": "https://www.youtube.com/@MrBeast",
+                    "snippet": "Main channel",
+                }
+            ]
+        ),
+        media_platform="youtube",
+        fetcher=lambda _url: """
+            <html>
+              <head>
+                <title>MrBeast - YouTube</title>
+                <meta property='og:title' content='MrBeast'>
+              </head>
+              <body><h1>MrBeast</h1></body>
+            </html>
+        """,
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.normalized_candidate_name == "mrbeast"
+    match = re.search(r"canonical_name_quality=([0-9.]+)", output.explanation)
+    assert match is not None
+    assert float(match.group(1)) >= 0.7
