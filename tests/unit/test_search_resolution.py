@@ -459,7 +459,8 @@ def test_wikipedia_stays_low_confidence_when_only_weak_evidence_exists() -> None
     )
     assert output is not None
     assert output.confidence_label == "low"
-    assert "query_validity=valid" in output.explanation
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "common_name_weak_context"
 
 
 def test_invalid_numeric_query_forces_low_confidence() -> None:
@@ -477,7 +478,8 @@ def test_invalid_numeric_query_forces_low_confidence() -> None:
     )
     assert output is not None
     assert output.confidence_label == "low"
-    assert output.ambiguity_reason == "invalid_query:numeric_or_garbage"
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "invalid_query:numeric_or_garbage"
 
 
 def test_invalid_short_query_applies_explicit_score_cap() -> None:
@@ -544,3 +546,84 @@ def test_common_name_without_context_remains_low_confidence() -> None:
     )
     assert output is not None
     assert output.confidence_label == "low"
+
+
+def test_official_executive_match_not_forced_low_confidence() -> None:
+    output = resolve_identity(
+        "Satya Nadella",
+        enrich_search_results(
+            [
+                {
+                    "title": "Satya Nadella - Chairman and CEO",
+                    "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                    "snippet": "Official leadership profile for Satya Nadella, Chairman and CEO at Microsoft.",
+                },
+                {
+                    "title": "Satya Nadella AI strategy interview",
+                    "url": "https://news.example.com/satya-nadella-interview",
+                    "snippet": "Interview coverage from industry media.",
+                },
+            ]
+        ),
+        role="CEO",
+        organization="Microsoft",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.confidence_label in {"medium", "high"}
+    assert "official_superiority_bonus=yes" in output.explanation
+
+
+def test_extraction_normalization_removes_navigation_junk() -> None:
+    html = """
+    <html>
+      <head><title>Jensen Huang - NVIDIA</title></head>
+      <body>
+        <nav>Source your privacy choices opt out icon</nav>
+        <header>Menu Privacy Terms</header>
+        <h1>Jensen Huang</h1>
+        <p>Founder and CEO at NVIDIA.</p>
+        <footer>Privacy cookie consent opt out</footer>
+      </body>
+    </html>
+    """
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - NVIDIA",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Founder and CEO.",
+                }
+            ]
+        ),
+        role="CEO",
+        organization="NVIDIA",
+        fetcher=lambda _url: html,
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.normalized_candidate_name == "jensen huang"
+    assert "privacy" not in output.normalized_candidate_name
+
+
+@pytest.mark.parametrize("query", ["a", "123456"])
+def test_invalid_queries_return_hard_no_resolution(query: str) -> None:
+    output = resolve_identity(
+        query,
+        enrich_search_results(
+            [
+                {
+                    "title": f"{query} - profile",
+                    "url": f"https://example.com/in/{query}",
+                    "snippet": "Generic profile page",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.no_resolution is True
+    assert output.source_url == ""
+    assert output.normalized_candidate_name == ""
+    assert "NO_RESOLUTION: invalid query" in output.explanation
