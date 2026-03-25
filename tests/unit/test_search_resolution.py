@@ -461,7 +461,7 @@ def test_wikipedia_stays_low_confidence_when_only_weak_evidence_exists() -> None
     assert output is not None
     assert output.confidence_label == "low"
     assert output.no_resolution is True
-    assert output.no_resolution_reason == "common_name_weak_context"
+    assert output.no_resolution_reason == "generic_encyclopedic_fallback_without_support"
 
 
 def test_invalid_numeric_query_forces_low_confidence() -> None:
@@ -707,3 +707,160 @@ def test_weak_evidence_results_in_no_resolution_without_ambiguity() -> None:
     assert output.no_resolution is True
     assert output.no_resolution_reason == "insufficient_evidence"
     assert output.ambiguity_detected is False
+
+
+def test_clustered_multi_source_official_identity_resolves_without_ambiguity() -> None:
+    output = resolve_identity(
+        "Satya Nadella",
+        enrich_search_results(
+            [
+                {
+                    "title": "Satya Nadella - Chairman and CEO",
+                    "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                    "snippet": "Official Microsoft leadership profile.",
+                },
+                {
+                    "title": "Satya Nadella | LinkedIn",
+                    "url": "https://www.linkedin.com/in/satya-nadella/",
+                    "snippet": "Chairman and CEO at Microsoft",
+                },
+                {
+                    "title": "Who is Satya Nadella?",
+                    "url": "https://apnews.com/article/satya-nadella-profile",
+                    "snippet": "AP profile of Microsoft CEO Satya Nadella.",
+                },
+            ]
+        ),
+        role="CEO",
+        organization="Microsoft",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.ambiguity_detected is False
+    assert output.confidence_label == "high"
+
+
+def test_official_first_party_bio_outranks_media_for_identity_resolution() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang discusses AI market",
+                    "url": "https://apnews.com/article/jensen-huang-ai",
+                    "snippet": "AP interview with NVIDIA CEO Jensen Huang.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA biography for founder and CEO Jensen Huang.",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    assert ranked[0].result.domain == "nvidia.com"
+    assert any("first_party_exact_name_org_priority" in reason for reason in ranked[0].reasons)
+
+
+def test_common_name_researchgate_only_profile_stays_no_resolution() -> None:
+    output = resolve_identity(
+        "María López",
+        enrich_search_results(
+            [
+                {
+                    "title": "María López | ResearchGate",
+                    "url": "https://www.researchgate.net/profile/Maria-Lopez-12",
+                    "snippet": "Professor profile and publications",
+                }
+            ]
+        ),
+        role="teacher",
+        location="Valencia",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "common_name_structured_profile_without_corroboration"
+
+
+def test_single_wikipedia_result_does_not_get_high_confidence() -> None:
+    output = resolve_identity(
+        "Taylor Swift",
+        enrich_search_results(
+            [
+                {
+                    "title": "Taylor Swift - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Taylor_Swift",
+                    "snippet": "American singer-songwriter.",
+                }
+            ]
+        ),
+        role="music singer",
+        location="usa",
+    )
+    assert output is not None
+    assert output.confidence_label != "high"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.vatican.va/content/francesco/en/biography/documents/papa-francesco_20130313_biografia-bergoglio.html",
+        "https://www.vaticannews.va/en/pope/news/2025-01/pope-francis-message.html",
+        "https://messi.com/en/biography/",
+    ],
+)
+def test_non_corporate_official_domains_are_typed_strongly(url: str) -> None:
+    ranked = rank_candidates(
+        enrich_search_results([{"title": "Official profile", "url": url, "snippet": "Official page"}]),
+        "Pope Francis",
+        ContextQuery(institutional_hint="vatican"),
+    )
+    assert ranked[0].authority_tier == "official_institutional"
+
+
+def test_creator_multi_channel_ecosystem_not_marked_ambiguous() -> None:
+    output = resolve_identity(
+        "MrBeast",
+        enrich_search_results(
+            [
+                {
+                    "title": "MrBeast - YouTube",
+                    "url": "https://www.youtube.com/@MrBeast",
+                    "snippet": "Main channel",
+                },
+                {
+                    "title": "MrBeast Gaming - YouTube",
+                    "url": "https://www.youtube.com/@MrBeastGaming",
+                    "snippet": "Secondary channel",
+                },
+                {
+                    "title": "MrBeast 2 - YouTube",
+                    "url": "https://www.youtube.com/@MrBeast2",
+                    "snippet": "Second channel",
+                },
+            ]
+        ),
+        media_platform="youtube",
+    )
+    assert output is not None
+    assert output.ambiguity_detected is False
+
+
+@pytest.mark.parametrize("query", ["Satya Nadella", "Jensen Huang"])
+def test_no_context_encyclopedic_fallback_reason_for_distinctive_name(query: str) -> None:
+    output = resolve_identity(
+        query,
+        enrich_search_results(
+            [
+                {
+                    "title": f"{query} - Wikipedia",
+                    "url": f"https://en.wikipedia.org/wiki/{query.replace(' ', '_')}",
+                    "snippet": f"{query} profile page.",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "generic_encyclopedic_fallback_without_support"
