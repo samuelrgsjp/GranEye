@@ -41,6 +41,19 @@ class SearchPipelineDiagnostics:
     query_validity: str = "valid"
 
 
+@dataclass(slots=True, frozen=True)
+class _PipelineExecution:
+    combined_results: tuple[Mapping[str, str], ...]
+    query_attempts: tuple[str, ...]
+    normalized_results_count: int
+    search_results: tuple[SearchResult, ...]
+    filter_decisions: tuple[FilterDecision, ...]
+    ranked: tuple[ScoredCandidate, ...]
+    parsed_context: ContextQuery
+    resolved: ResolutionOutput | None
+    query_validity: str
+
+
 def analyze_records(
     records: Iterable[ProfileRecord],
     analyzer: Analyzer,
@@ -366,41 +379,13 @@ def resolve_query(
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
     """End-to-end deterministic orchestration from query to ranked candidate output."""
-
-    combined_results, _ = _run_search(
-        _query_variants(target_name, context),
+    execution = _execute_resolution_pipeline(
+        target_name,
+        context=context,
         html_search=html_search,
         instant_search=instant_search,
     )
-
-    normalized_results = normalize_search_results(combined_results)
-    search_results, _ = filter_search_results(normalized_results)
-    parsed_context = _parse_context(context)
-    ranked = rank_candidates(
-        search_results,
-        target_name,
-        parsed_context,
-    )
-
-    try:
-        resolved = resolve_identity(
-            target_name,
-            search_results,
-            role=parsed_context.role,
-            organization=parsed_context.organization,
-            location=parsed_context.location,
-            domain_activity=parsed_context.domain_activity,
-            media_platform=parsed_context.media_platform,
-            institutional_hint=parsed_context.institutional_hint,
-            raw_context=parsed_context.raw_context,
-            generic_terms=parsed_context.generic_terms,
-        )
-    except Exception:
-        resolved = None
-
-    if resolved is not None:
-        ranked = _align_ranked_with_resolution(ranked, resolved)
-    return resolved, ranked
+    return execution.resolved, list(execution.ranked)
 
 
 def resolve_query_with_debug(
@@ -410,6 +395,42 @@ def resolve_query_with_debug(
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[ResolutionOutput | None, list[ScoredCandidate], SearchPipelineDiagnostics]:
+    execution = _execute_resolution_pipeline(
+        target_name,
+        context=context,
+        html_search=html_search,
+        instant_search=instant_search,
+    )
+
+    diagnostics = SearchPipelineDiagnostics(
+        raw_results_count=len(execution.combined_results),
+        normalized_results_count=execution.normalized_results_count,
+        filtered_results_count=len(execution.search_results),
+        ranked_candidates_count=len(execution.ranked),
+        filter_decisions=execution.filter_decisions,
+        ranked_candidates=execution.ranked,
+        query_attempts=execution.query_attempts,
+        source_diversity_count=len({item.result.domain for item in execution.ranked}),
+        ambiguity_triggered=bool(execution.resolved and execution.resolved.ambiguity_detected),
+        ambiguity_reason=execution.resolved.ambiguity_reason or "" if execution.resolved else "",
+        context_interpretation=(
+            f"role={execution.parsed_context.role or '-'}; org={execution.parsed_context.organization or '-'}; "
+            f"location={execution.parsed_context.location or '-'}; activity={execution.parsed_context.domain_activity or '-'}; "
+            f"platform={execution.parsed_context.media_platform or '-'}; institutional={execution.parsed_context.institutional_hint or '-'}; "
+            f"generic={','.join(execution.parsed_context.generic_terms[:6]) if execution.parsed_context.generic_terms else '-'}"
+        ),
+        query_validity=execution.query_validity,
+    )
+    return execution.resolved, list(execution.ranked), diagnostics
+
+
+def _execute_resolution_pipeline(
+    target_name: str,
+    *,
+    context: str | None,
+    html_search: Callable[[str], list[Mapping[str, str]]],
+    instant_search: Callable[[str], list[Mapping[str, str]]],
+) -> _PipelineExecution:
     combined_results, query_attempts = _run_search(
         _query_variants(target_name, context),
         html_search=html_search,
@@ -444,26 +465,17 @@ def resolve_query_with_debug(
     if resolved is not None:
         ranked = _align_ranked_with_resolution(ranked, resolved)
 
-    diagnostics = SearchPipelineDiagnostics(
-        raw_results_count=len(combined_results),
-        normalized_results_count=len(normalized_results),
-        filtered_results_count=len(search_results),
-        ranked_candidates_count=len(ranked),
-        filter_decisions=tuple(filter_decisions),
-        ranked_candidates=tuple(ranked),
+    return _PipelineExecution(
+        combined_results=tuple(combined_results),
         query_attempts=query_attempts,
-        source_diversity_count=len({item.result.domain for item in ranked}),
-        ambiguity_triggered=bool(resolved and resolved.ambiguity_detected),
-        ambiguity_reason=resolved.ambiguity_reason or "" if resolved else "",
-        context_interpretation=(
-            f"role={parsed_context.role or '-'}; org={parsed_context.organization or '-'}; "
-            f"location={parsed_context.location or '-'}; activity={parsed_context.domain_activity or '-'}; "
-            f"platform={parsed_context.media_platform or '-'}; institutional={parsed_context.institutional_hint or '-'}; "
-            f"generic={','.join(parsed_context.generic_terms[:6]) if parsed_context.generic_terms else '-'}"
-        ),
+        normalized_results_count=len(normalized_results),
+        search_results=tuple(search_results),
+        filter_decisions=tuple(filter_decisions),
+        ranked=tuple(ranked),
+        parsed_context=parsed_context,
+        resolved=resolved,
         query_validity=assess_query_validity(target_name).status,
     )
-    return resolved, ranked, diagnostics
 
 
 def _align_ranked_with_resolution(ranked: list[ScoredCandidate], resolved: ResolutionOutput) -> list[ScoredCandidate]:
