@@ -267,6 +267,52 @@ def test_official_executive_page_outranks_contextual_article() -> None:
     assert ranked[0].result.domain == "microsoft.com"
 
 
+def test_official_signal_prefers_jensen_official_even_with_weak_snippet() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+                    "snippet": "Jensen Huang is a business executive.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Leadership profile.",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    assert ranked[0].result.domain == "nvidia.com"
+
+
+def test_common_name_carlos_perez_keeps_no_resolution_with_weak_support() -> None:
+    output = resolve_identity(
+        "Carlos Pérez",
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez - Cybersecurity conference",
+                    "url": "https://events.example.com/news/carlos-perez",
+                    "snippet": "Cybersecurity speaker in Spain.",
+                },
+                {
+                    "title": "Carlos Pérez | LinkedIn",
+                    "url": "https://www.linkedin.com/in/carlos-perez",
+                    "snippet": "Software engineer in Madrid.",
+                },
+            ]
+        ),
+        domain_activity="cybersecurity",
+        location="Spain",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+
+
 def test_low_confidence_when_only_weak_generic_results_exist() -> None:
     output = resolve_identity(
         "John Smith",

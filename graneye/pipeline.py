@@ -328,12 +328,17 @@ def _run_search(
                     pass
 
         for item in merged_sources:
-            materialized = {
+            raw_materialized = {
                 "title": str(item.get("title") or "").strip(),
                 "url": str(item.get("url") or item.get("link") or "").strip(),
                 "snippet": str(item.get("snippet") or item.get("description") or "").strip(),
             }
-            canonical_url = _canonicalize_url(materialized["url"])
+            canonical_url = _canonicalize_url(raw_materialized["url"])
+            materialized = {
+                "title": " ".join(raw_materialized["title"].split()),
+                "url": canonical_url or raw_materialized["url"],
+                "snippet": " ".join(raw_materialized["snippet"].split()),
+            }
             title_signature = " ".join(materialized["title"].casefold().split())
             snippet_signature = " ".join(materialized["snippet"].casefold().split())
             domain_signature = urlparse(canonical_url).netloc.casefold()
@@ -344,7 +349,7 @@ def _run_search(
                     snippet_signature,
                     domain_signature,
                     materialized["title"],
-                    materialized["url"],
+                    raw_materialized["url"],
                     materialized["snippet"],
                     materialized,
                 )
@@ -384,11 +389,13 @@ def _canonicalize_url(url: str) -> str:
         netloc = netloc[:-3]
     if netloc.endswith(":443") and parsed.scheme == "https":
         netloc = netloc[:-4]
+    normalized_path = re.sub(r"/+", "/", parsed.path.strip()) or "/"
+    normalized_path = normalized_path if normalized_path == "/" else normalized_path.rstrip("/") or "/"
     cleaned = parsed._replace(
         netloc=netloc,
         query=urlencode(query_pairs, doseq=True),
         fragment="",
-        path=re.sub(r"/+", "/", parsed.path.rstrip("/")) or "/",
+        path=normalized_path,
     )
     return urlunparse(cleaned)
 

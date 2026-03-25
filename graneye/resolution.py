@@ -354,6 +354,16 @@ def _official_identity_signal(candidate: ScoredCandidate, query_name: str, conte
     if candidate.entity_type in {"official_profile", "official_bio"}:
         signal += 0.08
         reasons.append("official_person_entity")
+    if (
+        candidate.authority_tier == "official_institutional"
+        and candidate.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES
+        and (_path_has_identity_hints(path_segments) or _looks_like_person_title(candidate.result.title))
+    ):
+        signal += 0.1
+        reasons.append("official_identity_structure_signal")
+    if context.organization and org_coverage_domain_path >= 0.5 and org_coverage_text < 0.2:
+        signal += 0.08
+        reasons.append("org_domain_path_inference")
 
     return min(1.0, signal), tuple(reasons)
 
@@ -1349,7 +1359,7 @@ def _candidate_adjustment(
     if strong_official_exists and candidate.entity_type in {"media_article", "generic_article"}:
         adjustment -= 0.16
     if strong_official_exists and candidate.result.domain.endswith("wikipedia.org"):
-        adjustment -= 0.08
+        adjustment -= 0.12
     if candidate.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES and candidate.name_match in {"full_match", "reordered_match"}:
         identity_signal, _ = _official_identity_signal(candidate, query_name, context)
         if identity_signal >= 0.55:
