@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
 from .resolution import ResolutionOutput, ScoredCandidate, assess_query_validity
@@ -10,10 +13,21 @@ from .search import search_duckduckgo_html, search_duckduckgo_instant_answer
 
 
 class CLIArgs(argparse.Namespace):
-    target_name: str
+    target_name: str | None
     target_context: str | None
     debug: bool
     json: bool
+    jsonl: bool
+    input_file: str | None
+    batch: bool
+    batch_stdin: bool
+
+
+@dataclass(frozen=True)
+class BatchRecord:
+    input_index: int
+    target_name: str
+    target_context: str | None
 
 
 def _parse_args(argv: list[str] | None = None) -> CLIArgs:
@@ -21,7 +35,7 @@ def _parse_args(argv: list[str] | None = None) -> CLIArgs:
         prog="graneye",
         description="Resolve a likely public profile candidate for a person name.",
     )
-    parser.add_argument("target_name", help="Target person name to resolve")
+    parser.add_argument("target_name", nargs="?", default=None, help="Target person name to resolve")
     parser.add_argument(
         "target_context",
         nargs="?",
@@ -37,6 +51,26 @@ def _parse_args(argv: list[str] | None = None) -> CLIArgs:
         "--json",
         action="store_true",
         help="Return stable machine-readable JSON output.",
+    )
+    parser.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="Return newline-delimited JSON output for batch mode.",
+    )
+    parser.add_argument(
+        "--input-file",
+        default=None,
+        help="Read batch input from a file (plain text tab-separated or CSV).",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Enable batch mode and read records from stdin.",
+    )
+    parser.add_argument(
+        "--batch-stdin",
+        action="store_true",
+        help="Alias for --batch.",
     )
 
     namespace = parser.parse_args(argv, namespace=CLIArgs())
@@ -213,6 +247,120 @@ def _json_payload(
     return payload
 
 
+def _batch_json_payload(
+    *,
+    input_index: int,
+    target_name: str,
+    target_context: str | None,
+    query_validity: str,
+    output: ResolutionOutput,
+    error: str | None = None,
+) -> dict[str, object]:
+    payload = _json_payload(
+        target_name=target_name,
+        target_context=target_context,
+        query_validity=query_validity,
+        output=output,
+    )
+    payload["input_index"] = input_index
+    payload["error"] = error
+    return payload
+
+
+def _iterate_batch_text_lines(lines: Iterable[str]) -> Iterable[tuple[str, str | None]]:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "\t" in line:
+            name_part, context_part = line.split("\t", 1)
+            name = name_part.strip()
+            context = context_part.strip() or None
+        else:
+            name = line
+            context = None
+        if not name:
+            continue
+        yield (name, context)
+
+
+def _iterate_batch_csv_rows(lines: Iterable[str]) -> Iterable[tuple[str, str | None]]:
+    reader = csv.reader(lines)
+    for row in reader:
+        if not row:
+            continue
+        first = row[0].strip() if row[0] else ""
+        if not first or first.startswith("#"):
+            continue
+        context = row[1].strip() if len(row) > 1 and row[1] else None
+        yield (first, context or None)
+
+
+def _read_batch_records(args: CLIArgs) -> list[BatchRecord]:
+    source_lines: list[str]
+    if args.input_file:
+        with open(args.input_file, encoding="utf-8") as handle:
+            source_lines = handle.readlines()
+        is_csv = args.input_file.lower().endswith(".csv")
+    else:
+        source_lines = sys.stdin.read().splitlines()
+        is_csv = False
+
+    rows = _iterate_batch_csv_rows(source_lines) if is_csv else _iterate_batch_text_lines(source_lines)
+    return [
+        BatchRecord(input_index=index, target_name=name, target_context=context)
+        for index, (name, context) in enumerate(rows, start=1)
+    ]
+
+
+def _process_query(target_name: str, context: str | None, debug: bool) -> tuple[ResolutionOutput, SearchPipelineDiagnostics | None]:
+    diagnostics: SearchPipelineDiagnostics | None = None
+    if debug:
+        resolved_output, ranked, diagnostics = resolve_query_with_debug(
+            target_name,
+            context=context,
+            html_search=search_duckduckgo_html,
+            instant_search=search_duckduckgo_instant_answer,
+        )
+    else:
+        resolved_output, ranked = resolve_query(
+            target_name,
+            context=context,
+            html_search=search_duckduckgo_html,
+            instant_search=search_duckduckgo_instant_answer,
+        )
+    query_validity = assess_query_validity(target_name).status
+    final_output = _build_final_output(
+        query_validity=query_validity,
+        resolved=resolved_output,
+        ranked=ranked,
+    )
+    return final_output, diagnostics
+
+
+def _empty_error_output(error_text: str) -> ResolutionOutput:
+    return ResolutionOutput(
+        normalized_candidate_name="",
+        source_url="",
+        source_title="",
+        final_score=0.0,
+        entity_type="unknown",
+        same_person_probability=0.0,
+        context_match_probability=0.0,
+        possible_role=None,
+        possible_organization=None,
+        possible_location=None,
+        explanation=f"NO_RESOLUTION: {error_text}",
+        resolution_path="search_only",
+        fetch_status="not_attempted",
+        confidence_label="low",
+        ambiguity_detected=False,
+        ambiguity_reason=None,
+        no_resolution=True,
+        no_resolution_reason="execution_error",
+    )
+
+
 def _exit_code(output: ResolutionOutput) -> int:
     status = _resolution_status(output)
     if status == "ambiguous":
@@ -224,6 +372,61 @@ def _exit_code(output: ResolutionOutput) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    batch_mode = bool(args.input_file or args.batch or args.batch_stdin)
+
+    if args.json and args.jsonl:
+        print("Error: use either --json or --jsonl, not both.", file=sys.stderr)
+        return 3
+
+    if batch_mode:
+        if args.target_name is not None:
+            print("Error: positional target_name is not used in batch mode.", file=sys.stderr)
+            return 3
+        if args.debug:
+            print("Error: --debug is only available in single-query mode.", file=sys.stderr)
+            return 3
+        if args.json:
+            print("Error: --json is for single-query mode; use --jsonl for batch mode.", file=sys.stderr)
+            return 3
+
+        try:
+            records = _read_batch_records(args)
+        except Exception as exc:
+            print(f"Error: failed to read batch input: {exc}", file=sys.stderr)
+            return 3
+
+        for record in records:
+            record_output: ResolutionOutput
+            try:
+                record_output, _ = _process_query(record.target_name, record.target_context, debug=False)
+                query_validity = assess_query_validity(record.target_name).status
+                payload = _batch_json_payload(
+                    input_index=record.input_index,
+                    target_name=record.target_name,
+                    target_context=record.target_context,
+                    query_validity=query_validity,
+                    output=record_output,
+                    error=None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive path
+                record_output = _empty_error_output(str(exc))
+                payload = _batch_json_payload(
+                    input_index=record.input_index,
+                    target_name=record.target_name,
+                    target_context=record.target_context,
+                    query_validity="unknown",
+                    output=record_output,
+                    error=str(exc),
+                )
+            if args.jsonl:
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                print(_render_output(record.target_name, record.target_context, record_output))
+                print(f"Input index: {record.input_index}")
+                if payload["error"]:
+                    print(f"Error: {payload['error']}")
+                print("---")
+        return 0
 
     if _is_blank(args.target_name):
         print("Error: target_name must not be empty.", file=sys.stderr)
@@ -231,33 +434,15 @@ def main(argv: list[str] | None = None) -> int:
 
     target_name = args.target_name.strip()
     context = args.target_context.strip() if args.target_context else None
-    query_validity = assess_query_validity(target_name).status
 
     diagnostics: SearchPipelineDiagnostics | None = None
     try:
-        if args.debug:
-            resolved_output, ranked, diagnostics = resolve_query_with_debug(
-                target_name,
-                context=context,
-                html_search=search_duckduckgo_html,
-                instant_search=search_duckduckgo_instant_answer,
-            )
-        else:
-            resolved_output, ranked = resolve_query(
-                target_name,
-                context=context,
-                html_search=search_duckduckgo_html,
-                instant_search=search_duckduckgo_instant_answer,
-            )
+        final_output, diagnostics = _process_query(target_name, context, args.debug)
     except Exception as exc:  # pragma: no cover - defensive path
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
         return 3
 
-    final_output = _build_final_output(
-        query_validity=query_validity,
-        resolved=resolved_output,
-        ranked=ranked,
-    )
+    query_validity = assess_query_validity(target_name).status
 
     if args.debug and diagnostics is not None:
         print(_render_debug_output(diagnostics))

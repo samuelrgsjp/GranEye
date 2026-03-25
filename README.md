@@ -29,7 +29,7 @@ python -m graneye "Laura Gómez Martínez" "Lawyer Barcelona"
 ```
 
 Notes:
-- `target_name` is required.
+- `target_name` is required in single-query mode.
 - `target_context` is optional and can be broad (for example: `Lawyer Barcelona`, `Actress`, `YouTuber Spain`, `University professor Madrid`, `TV personality`).
 - Use `graneye --help` for argument details.
 - Default CLI output is concise and human-readable (`Name`, `Context`, `Status`, `Confidence`, `Top candidate`, `Source URL`; `Reason` appears for `ambiguous`/`no-resolution`).
@@ -40,12 +40,69 @@ Notes:
   - `top_candidate`, `source_url`, `display_title`
   - `same_person_probability`, `context_match_probability`, `entity_type`, `decision_reason`
 
+### Batch Usage
+
+GranEye now supports explicit batch processing without changing single-query behavior.
+
+#### Input modes
+
+1) File input:
+
+```bash
+python -m graneye --input-file targets.txt --jsonl
+python -m graneye --input-file targets.csv --jsonl
+```
+
+2) Stdin input:
+
+```bash
+cat targets.txt | python -m graneye --batch --jsonl
+printf 'Jensen Huang\tNVIDIA CEO\nSatya Nadella\n' | python -m graneye --batch --jsonl
+```
+
+#### Batch input format rules (plain text)
+
+- Each record is one line.
+- Format: `target_name[TAB]target_context`
+- `target_context` is optional.
+- Blank lines are ignored.
+- Lines starting with `#` are ignored.
+
+Examples:
+
+```text
+Jensen Huang	NVIDIA CEO
+Carlos Pérez	Cybersecurity Spain
+Taylor Swift	music singer usa
+Satya Nadella
+```
+
+#### Batch output
+
+- Human-readable batch output (default in batch mode): compact per-record blocks.
+- `--jsonl` output (recommended for pipelines): one JSON object per input record.
+- `--json` remains single-query only.
+
+Batch JSONL objects include:
+
+- `input_index`
+- `target_name`, `target_context`, `query_validity`
+- `resolution_status`, `no_resolution_reason`, `ambiguity_reason`, `confidence`
+- `top_candidate`, `source_url`, `display_title`
+- `same_person_probability`, `context_match_probability`, `entity_type`, `decision_reason`
+- `error` (null unless processing that record failed)
+
 ### Resolution States and Exit Codes
 
 - `resolved` → process exit code `0`
 - `ambiguous` → process exit code `1`
 - `no-resolution` → process exit code `2`
 - invalid usage / CLI runtime error → process exit code `3`
+
+Batch mode exit codes:
+
+- batch execution completed (including per-record no-resolution/ambiguity/failures) → process exit code `0`
+- batch-level input/CLI/runtime failure that prevents normal processing → process exit code `3`
 
 ### Source Categories
 
