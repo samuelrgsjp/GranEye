@@ -69,6 +69,11 @@ def test_parse_args_supports_json_flag() -> None:
     assert parsed.json is True
 
 
+def test_parse_args_supports_batch_flag_without_alias() -> None:
+    parsed = cli._parse_args(["--batch"])
+    assert parsed.batch is True
+
+
 @pytest.mark.parametrize(
     ("argv", "expected_code", "expected_text"),
     [
@@ -479,6 +484,24 @@ def test_batch_stdin_jsonl_mode(
     assert second["target_context"] is None
 
 
+def test_batch_stdin_human_output_has_readable_block_format(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Jensen Huang\tNVIDIA CEO\nSatya Nadella\n"))
+
+    code = cli.main(["--batch"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "[1] Jensen Huang | NVIDIA CEO" in captured.out
+    assert "Status: resolved" in captured.out
+    assert "Top candidate: laura gomez martinez" in captured.out
+    assert "[2] Satya Nadella | (none)" in captured.out
+    assert "\n---\n" not in captured.out
+
+
 def test_batch_per_record_failure_does_not_abort(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -509,6 +532,13 @@ def test_batch_requires_batch_output_flags_for_single_json(
     captured = capsys.readouterr()
     assert code == 3
     assert "use --jsonl for batch mode" in captured.err
+
+
+def test_single_mode_rejects_jsonl_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["Laura Gómez Martínez", "--jsonl"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "--jsonl is for batch mode only" in captured.err
 
 
 def test_batch_file_read_failure_returns_cli_error(capsys: pytest.CaptureFixture[str]) -> None:

@@ -20,7 +20,6 @@ class CLIArgs(argparse.Namespace):
     jsonl: bool
     input_file: str | None
     batch: bool
-    batch_stdin: bool
 
 
 @dataclass(frozen=True)
@@ -67,11 +66,6 @@ def _parse_args(argv: list[str] | None = None) -> CLIArgs:
         action="store_true",
         help="Enable batch mode and read records from stdin.",
     )
-    parser.add_argument(
-        "--batch-stdin",
-        action="store_true",
-        help="Alias for --batch.",
-    )
 
     namespace = parser.parse_args(argv, namespace=CLIArgs())
     return namespace
@@ -103,6 +97,30 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
         f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
         f"Source URL: {output.source_url}",
     ]
+    return "\n".join(lines)
+
+
+def _render_batch_human_output(
+    *,
+    input_index: int,
+    target_name: str,
+    target_context: str | None,
+    output: ResolutionOutput,
+    error: str | None,
+) -> str:
+    status = _resolution_status(output)
+    lines = [
+        f"[{input_index}] {target_name} | {target_context or '(none)'}",
+        f"Status: {status}",
+        f"Confidence: {output.confidence_label}",
+        f"Top candidate: {output.normalized_candidate_name or '(none)'}",
+        f"Source URL: {output.source_url or '(none)'}",
+    ]
+    reason = output.no_resolution_reason or output.ambiguity_reason
+    if reason:
+        lines.append(f"Reason: {reason}")
+    if error:
+        lines.append(f"Error: {error}")
     return "\n".join(lines)
 
 
@@ -198,6 +216,12 @@ def _build_final_output(
             no_resolution=True,
             no_resolution_reason="no_candidates",
         )
+
+    # Intentional fallback path:
+    # If ranking produced candidates but page-level resolution did not complete
+    # (for example due to fetch blocking), return a search-only low-confidence
+    # output so callers can still inspect the strongest ranked candidate.
+    # This is not page-validated identity resolution.
     top = ranked[0]
     return ResolutionOutput(
         normalized_candidate_name=top.result.title or top.result.domain,
@@ -370,63 +394,74 @@ def _exit_code(output: ResolutionOutput) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    batch_mode = bool(args.input_file or args.batch or args.batch_stdin)
-
+def _validate_mode_flags(args: CLIArgs) -> int | None:
     if args.json and args.jsonl:
         print("Error: use either --json or --jsonl, not both.", file=sys.stderr)
         return 3
+    return None
 
-    if batch_mode:
-        if args.target_name is not None:
-            print("Error: positional target_name is not used in batch mode.", file=sys.stderr)
-            return 3
-        if args.debug:
-            print("Error: --debug is only available in single-query mode.", file=sys.stderr)
-            return 3
-        if args.json:
-            print("Error: --json is for single-query mode; use --jsonl for batch mode.", file=sys.stderr)
-            return 3
 
+def _run_batch_mode(args: CLIArgs) -> int:
+    if args.target_name is not None:
+        print("Error: positional target_name is not used in batch mode.", file=sys.stderr)
+        return 3
+    if args.debug:
+        print("Error: --debug is only available in single-query mode.", file=sys.stderr)
+        return 3
+    if args.json:
+        print("Error: --json is for single-query mode; use --jsonl for batch mode.", file=sys.stderr)
+        return 3
+
+    try:
+        records = _read_batch_records(args)
+    except Exception as exc:
+        print(f"Error: failed to read batch input: {exc}", file=sys.stderr)
+        return 3
+
+    for record in records:
+        record_output: ResolutionOutput
         try:
-            records = _read_batch_records(args)
-        except Exception as exc:
-            print(f"Error: failed to read batch input: {exc}", file=sys.stderr)
-            return 3
+            record_output, _ = _process_query(record.target_name, record.target_context, debug=False)
+            query_validity = assess_query_validity(record.target_name).status
+            payload = _batch_json_payload(
+                input_index=record.input_index,
+                target_name=record.target_name,
+                target_context=record.target_context,
+                query_validity=query_validity,
+                output=record_output,
+                error=None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive path
+            record_output = _empty_error_output(str(exc))
+            payload = _batch_json_payload(
+                input_index=record.input_index,
+                target_name=record.target_name,
+                target_context=record.target_context,
+                query_validity="unknown",
+                output=record_output,
+                error=str(exc),
+            )
+        if args.jsonl:
+            print(json.dumps(payload, ensure_ascii=False))
+            continue
 
-        for record in records:
-            record_output: ResolutionOutput
-            try:
-                record_output, _ = _process_query(record.target_name, record.target_context, debug=False)
-                query_validity = assess_query_validity(record.target_name).status
-                payload = _batch_json_payload(
-                    input_index=record.input_index,
-                    target_name=record.target_name,
-                    target_context=record.target_context,
-                    query_validity=query_validity,
-                    output=record_output,
-                    error=None,
-                )
-            except Exception as exc:  # pragma: no cover - defensive path
-                record_output = _empty_error_output(str(exc))
-                payload = _batch_json_payload(
-                    input_index=record.input_index,
-                    target_name=record.target_name,
-                    target_context=record.target_context,
-                    query_validity="unknown",
-                    output=record_output,
-                    error=str(exc),
-                )
-            if args.jsonl:
-                print(json.dumps(payload, ensure_ascii=False))
-            else:
-                print(_render_output(record.target_name, record.target_context, record_output))
-                print(f"Input index: {record.input_index}")
-                if payload["error"]:
-                    print(f"Error: {payload['error']}")
-                print("---")
-        return 0
+        print(
+            _render_batch_human_output(
+                input_index=record.input_index,
+                target_name=record.target_name,
+                target_context=record.target_context,
+                output=record_output,
+                error=payload["error"] if isinstance(payload["error"], str) else None,
+            )
+        )
+        print()
+    return 0
+
+
+def _run_single_mode(args: CLIArgs) -> int:
+    if args.jsonl:
+        print("Error: --jsonl is for batch mode only.", file=sys.stderr)
+        return 3
 
     if _is_blank(args.target_name):
         print("Error: target_name must not be empty.", file=sys.stderr)
@@ -463,6 +498,16 @@ def main(argv: list[str] | None = None) -> int:
         else _render_output(target_name, context, final_output)
     )
     return _exit_code(final_output)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    validation_error = _validate_mode_flags(args)
+    if validation_error is not None:
+        return validation_error
+
+    batch_mode = bool(args.input_file or args.batch)
+    return _run_batch_mode(args) if batch_mode else _run_single_mode(args)
 
 
 def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
