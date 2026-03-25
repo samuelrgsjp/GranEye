@@ -337,7 +337,6 @@ def test_top_candidate_extraction(html: str, expected_role: str, expected_org: s
     )
 
     output = resolve_identity("Jane Doe", results, fetcher=lambda _url: html)
-
     assert output is not None
     assert output.possible_role == expected_role
     assert output.possible_organization == expected_org
@@ -345,6 +344,61 @@ def test_top_candidate_extraction(html: str, expected_role: str, expected_org: s
     assert output.entity_type == "person_profile"
     assert output.resolution_path == "full_content"
     assert output.fetch_status == "ok"
+
+
+def test_deterministic_selection_for_jensen_huang_fixture() -> None:
+    fixture_results = enrich_search_results(
+        [
+            {
+                "title": "Jensen Huang - Founder and CEO",
+                "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                "snippet": "Official NVIDIA biography of Jensen Huang, founder and CEO.",
+            },
+            {
+                "title": "Jensen Huang - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+                "snippet": "Jensen Huang is the co-founder and CEO of Nvidia.",
+            },
+            {
+                "title": "Jensen Huang profile",
+                "url": "https://profiles.example.com/in/jensen-huang",
+                "snippet": "Professional profile page.",
+            },
+        ]
+    )
+    outputs = [
+        resolve_identity("Jensen Huang", fixture_results, role="CEO", organization="NVIDIA")
+        for _ in range(8)
+    ]
+    assert all(output is not None for output in outputs)
+    assert {output.source_url for output in outputs if output is not None} == {
+        "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/"
+    }
+
+
+def test_representative_selection_stable_with_multiple_strong_candidates() -> None:
+    fixture_results = enrich_search_results(
+        [
+            {
+                "title": "Jane Doe - Executive Leadership",
+                "url": "https://example.com/leadership/jane-doe",
+                "snippet": "Jane Doe serves as CTO at Example Corp.",
+            },
+            {
+                "title": "Jane Doe - Executive Leadership",
+                "url": "https://example.com/leadership/jane-doe",
+                "snippet": "Jane Doe serves as CTO at Example Corp.",
+            },
+            {
+                "title": "Jane Doe - About",
+                "url": "https://alt.example.org/people/jane-doe",
+                "snippet": "Jane Doe technical executive profile.",
+            },
+        ]
+    )
+    ranked_runs = [rank_candidates(fixture_results, "Jane Doe", ContextQuery(role="CTO")) for _ in range(5)]
+    top_urls = [ranked[0].result.url for ranked in ranked_runs]
+    assert top_urls == [top_urls[0]] * len(top_urls)
 
 
 def test_resolve_identity_falls_back_when_fetch_is_blocked() -> None:

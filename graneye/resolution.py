@@ -814,7 +814,7 @@ def _cluster_identity_evidence(ranked: list[ScoredCandidate], query_name: str, c
         grouped.setdefault(key, []).append(candidate)
     clusters: list[IdentityClusterEvidence] = []
     for key, members in grouped.items():
-        representative = max(members, key=lambda item: _representative_priority(item, context))
+        representative = max(members, key=lambda item: (_representative_priority(item, context), _deterministic_candidate_key(item)))
         domains = {item.result.domain for item in members}
         official_support_count = sum(1 for item in members if item.authority_tier == "official_institutional")
         strong_source_count = sum(
@@ -851,6 +851,9 @@ def _cluster_identity_evidence(ranked: list[ScoredCandidate], query_name: str, c
             -item.strong_source_count,
             -item.creator_asset_hierarchy_score,
             -item.representative.score,
+            item.representative.result.domain,
+            item.representative.result.url,
+            item.key,
         )
     )
     return clusters
@@ -903,6 +906,18 @@ def _representative_priority(candidate: ScoredCandidate, context: ContextQuery) 
         person_bonus + entity_priority + authority_priority - event_penalty,
         candidate.score + context_bonus,
         candidate.typing_confidence,
+    )
+
+
+def _deterministic_candidate_key(candidate: ScoredCandidate) -> tuple[str, ...]:
+    return (
+        candidate.result.domain,
+        candidate.result.url,
+        candidate.result.title.casefold(),
+        (candidate.result.snippet or "").casefold(),
+        candidate.entity_type,
+        candidate.name_match,
+        candidate.authority_tier,
     )
 
 
@@ -1244,6 +1259,11 @@ def rank_candidates(results: Iterable[SearchResult], query_name: str, context: C
             item.seo_penalty,
             item.result.domain,
             item.result.url,
+            item.result.title.casefold(),
+            (item.result.snippet or "").casefold(),
+            item.entity_type,
+            item.name_match,
+            tuple(item.reasons),
         ),
     )
 
@@ -1298,8 +1318,8 @@ def resolve_identity(
             resolution_path="search_only",
             fetch_status="not_attempted",
             confidence_label="low",
-            ambiguity_detected=True,
-            ambiguity_reason=f"invalid_query:{query_validity.status}",
+            ambiguity_detected=False,
+            ambiguity_reason=None,
             no_resolution=True,
             no_resolution_reason=f"invalid_query:{query_validity.status}",
         )
@@ -1676,6 +1696,6 @@ def resolve_identity(
         confidence_label=confidence_label,
         ambiguity_detected=ambiguity_detected,
         ambiguity_reason=ambiguity_reason,
-        no_resolution=ambiguity_detected,
-        no_resolution_reason=ambiguity_reason if ambiguity_detected else None,
+        no_resolution=False,
+        no_resolution_reason=None,
     )

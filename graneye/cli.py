@@ -48,11 +48,12 @@ def _is_blank(value: str | None) -> bool:
 
 
 def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
-    if output.no_resolution:
+    status = _resolution_status(output)
+    if status != "resolved":
         lines = [
             f"Name: {target_name}",
             f"Context: {target_context}" if target_context else "Context: (none)",
-            f"Status: {'ambiguous' if output.ambiguity_detected else 'no-resolution'}",
+            f"Status: {status}",
             f"Confidence: {output.confidence_label}",
             f"Top candidate: {output.normalized_candidate_name or '(none)'}",
             f"Source URL: {output.source_url or '(none)'}",
@@ -72,11 +73,12 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
 
 
 def _render_debug_result_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
-    if output.no_resolution:
+    status = _resolution_status(output)
+    if status != "resolved":
         lines = [
             f"Target name: {target_name}",
             f"Target context: {target_context}" if target_context else "Target context: (none)",
-            "Resolution: no-resolution",
+            f"Resolution: {status}",
             f"Reason: {output.no_resolution_reason or output.ambiguity_reason or 'unknown'}",
             f"Confidence: {output.confidence_label}",
             f"Decision reason: {output.explanation}",
@@ -105,10 +107,10 @@ def _render_debug_result_output(target_name: str, target_context: str | None, ou
 def _resolution_status(output: ResolutionOutput | None) -> str:
     if output is None:
         return "resolved"
-    if output.ambiguity_detected:
-        return "ambiguous"
     if output.no_resolution:
         return "no-resolution"
+    if output.ambiguity_detected:
+        return "ambiguous"
     return "resolved"
 
 
@@ -142,11 +144,10 @@ def _json_payload(
 def _exit_code(output: ResolutionOutput | None, ranked_count: int) -> int:
     if ranked_count == 0:
         return 2
-    if output is None:
-        return 0
-    if output.ambiguity_detected:
+    status = _resolution_status(output)
+    if status == "ambiguous":
         return 1
-    if output.no_resolution:
+    if status == "no-resolution":
         return 2
     return 0
 

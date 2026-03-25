@@ -240,8 +240,8 @@ def test_main_returns_ambiguous_exit_code(monkeypatch: pytest.MonkeyPatch, capsy
         explanation="AMBIGUOUS: close candidates.",
         ambiguity_detected=True,
         ambiguity_reason="multiple_plausible_candidates",
-        no_resolution=True,
-        no_resolution_reason="multiple_plausible_candidates",
+        no_resolution=False,
+        no_resolution_reason=None,
     )
     monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, _fake_ranked()))
 
@@ -277,3 +277,86 @@ def test_main_json_output_has_expected_keys(monkeypatch: pytest.MonkeyPatch, cap
     }
     assert expected_keys.issubset(payload.keys())
     assert payload["resolution_status"] == "resolved"
+
+
+@pytest.mark.parametrize(
+    ("output", "expected_status"),
+    [
+        (_fake_output(), "resolved"),
+        (
+            ResolutionOutput(
+                normalized_candidate_name="",
+                source_url="",
+                source_title="",
+                final_score=0.41,
+                entity_type="unknown",
+                same_person_probability=0.0,
+                context_match_probability=0.1,
+                possible_role=None,
+                possible_organization=None,
+                possible_location=None,
+                explanation="NO_RESOLUTION: insufficient evidence",
+                no_resolution=True,
+                no_resolution_reason="insufficient_evidence",
+                confidence_label="low",
+            ),
+            "no-resolution",
+        ),
+    ],
+)
+def test_human_and_json_share_resolution_status_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    output: ResolutionOutput,
+    expected_status: str,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, _fake_ranked()))
+
+    code = cli.main(["Laura Gómez Martínez"])
+    human = capsys.readouterr()
+    assert code == (0 if expected_status == "resolved" else 2)
+    assert f"Status: {expected_status}" in human.out
+
+    code = cli.main(["Laura Gómez Martínez", "--json"])
+    machine = capsys.readouterr()
+    payload = json.loads(machine.out)
+    assert code == (0 if expected_status == "resolved" else 2)
+    assert payload["resolution_status"] == expected_status
+
+
+@pytest.mark.parametrize("query", ["123456", "a"])
+def test_invalid_query_reports_no_resolution_in_human_and_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    query: str,
+) -> None:
+    invalid_output = ResolutionOutput(
+        normalized_candidate_name="",
+        source_url="",
+        source_title="",
+        final_score=0.0,
+        entity_type="unknown",
+        same_person_probability=0.0,
+        context_match_probability=0.0,
+        possible_role=None,
+        possible_organization=None,
+        possible_location=None,
+        explanation=f"NO_RESOLUTION: invalid query ({query})",
+        no_resolution=True,
+        no_resolution_reason="invalid_query:numeric_or_garbage",
+        ambiguity_detected=False,
+        ambiguity_reason=None,
+        confidence_label="low",
+    )
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (invalid_output, _fake_ranked()))
+
+    human_code = cli.main([query])
+    human = capsys.readouterr()
+    assert human_code == 2
+    assert "Status: no-resolution" in human.out
+
+    json_code = cli.main([query, "--json"])
+    machine = capsys.readouterr()
+    payload = json.loads(machine.out)
+    assert json_code == 2
+    assert payload["resolution_status"] == "no-resolution"
