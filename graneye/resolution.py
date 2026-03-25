@@ -144,6 +144,32 @@ _NOISE_TEXT_HINTS = {
     "menu",
     "navigation",
 }
+_STRONG_NON_IDENTITY_NOISE_HINTS = {
+    "job",
+    "jobs",
+    "vacancy",
+    "vacancies",
+    "hiring",
+    "oferta",
+    "ofertas",
+    "empleo",
+    "empleos",
+    "template",
+    "plantilla",
+    "manual",
+    "documentation",
+    "docs",
+    "guide",
+    "tutorial",
+    "command",
+    "commands",
+    "how to",
+    "sample contract",
+    "modelo",
+    "form",
+    "formulario",
+    "profiles",
+}
 _PERSON_ROLE_HINTS = {
     "ceo",
     "chief",
@@ -594,10 +620,26 @@ def is_noise_result(result: SearchResult) -> bool:
     """Detect low-signal pages such as directories, list pages, and SEO aggregators."""
 
     text = _joined_text(result)
-    noisy_phrases = ("top ", "best ", "list of", "find people", "people search")
+    noisy_phrases = (
+        "top ",
+        "best ",
+        "list of",
+        "find people",
+        "people search",
+        "job description",
+        "search jobs",
+        "ofertas de empleo",
+        "job openings",
+        "system administrator commands",
+        "system administrator guide",
+        "company profile",
+        "about our company",
+        "samuel ruiz profiles",
+    )
 
     return (
         detect_entity_type(result) in {"directory_listing", "aggregator_profile"}
+        or any(hint in text for hint in _STRONG_NON_IDENTITY_NOISE_HINTS)
         or any(phrase in text for phrase in noisy_phrases)
         or re.search(r"\b(aggregator|directory|listing)\b", text) is not None
     )
@@ -819,6 +861,11 @@ def score_candidate(
     if noisy:
         score -= 0.35
         reasons.append("noise_penalty")
+    if entity_type in {"generic_article", "media_article", "institutional_profile"} and any(
+        hint in _joined_text(result) for hint in _STRONG_NON_IDENTITY_NOISE_HINTS
+    ):
+        score -= 0.22
+        reasons.append("strong_non_identity_noise_penalty")
     if seo_penalty > 0:
         score -= seo_penalty
         reasons.append(f"seo_penalty:{seo_penalty:.2f}")

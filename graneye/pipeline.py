@@ -105,6 +105,13 @@ _ROLE_HINTS = {
     "co-founder",
     "administrator",
     "administrador",
+    "sysadmin",
+    "support",
+    "soporte",
+    "informatico",
+    "informática",
+    "informatica",
+    "it",
     "systems",
     "sistemas",
 }
@@ -149,8 +156,34 @@ _ROLE_PHRASES = (
     "machine learning engineer",
     "security engineer",
     "system administrator",
+    "it administrator",
+    "it support",
+    "soporte it",
+    "tecnico it",
+    "técnico it",
+    "informatico",
+    "informático",
     "administrador de sistemas",
 )
+_ROLE_TOKEN_EXCLUSIONS = {"en", "in"}
+_ORG_VERB_PREFIXES = ("trabaja en ", "works at ", "employee at ", "empleado en ")
+_ORG_LINKING_STOPWORDS = {
+    "trabaja",
+    "trabajar",
+    "works",
+    "work",
+    "employee",
+    "empleado",
+    "empleada",
+    "en",
+    "in",
+    "de",
+    "del",
+    "at",
+    "for",
+    "with",
+    "of",
+}
 _PRIVATE_PROFILE_MARKERS = (
     "linkedin",
     "staff",
@@ -198,6 +231,24 @@ def _parse_context(context: str | None) -> ContextQuery:
     tokens = [token.casefold() for token in words]
 
     lowered = " ".join(tokens)
+
+    def _clean_fragment(value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", value).strip(" ,.;:-")
+        cleaned = re.sub(r"\b(?:en|in)\s*$", "", cleaned, flags=re.I).strip(" ,.;:-")
+        return cleaned
+
+    def _dedupe_tokens(value: str) -> str:
+        parts = [part for part in re.findall(r"[A-Za-zÀ-ÿ0-9]+", value) if part]
+        ordered = [part for part in dict.fromkeys(parts)]
+        return " ".join(ordered).strip()
+
+    def _looks_role_like(value: str | None) -> bool:
+        if not value:
+            return False
+        value_tokens = [token.casefold() for token in re.findall(r"[A-Za-zÀ-ÿ]+", value)]
+        if not value_tokens:
+            return False
+        return any(token in _ROLE_HINTS for token in value_tokens)
     for phrase in _ROLE_PHRASES:
         if phrase in lowered:
             role = phrase
@@ -206,6 +257,10 @@ def _parse_context(context: str | None) -> ContextQuery:
         role_tokens = [token for token in tokens if token in _ROLE_HINTS]
         if role_tokens:
             role = " ".join(dict.fromkeys(role_tokens))
+    if role is not None:
+        role = " ".join(token for token in role.split() if token not in _ROLE_TOKEN_EXCLUSIONS).strip()
+        if role == "sysadmin":
+            role = "system administrator"
 
     platform_tokens = [token for token in tokens if token in _PLATFORM_HINTS]
     if platform_tokens:
@@ -214,9 +269,35 @@ def _parse_context(context: str | None) -> ContextQuery:
     if institutional_tokens:
         institutional_hint = " ".join(dict.fromkeys(institutional_tokens))
 
+    org_loc_pattern = re.search(
+        r"\b(?:trabaja en|works at|employee at|empleado en)\s+([A-Za-zÀ-ÿ0-9&.'-][A-Za-zÀ-ÿ0-9&.'\- ]{1,80}?)\s+(?:en|in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,80})$",
+        normalized,
+        flags=re.I,
+    )
+    if org_loc_pattern:
+        organization = _clean_fragment(org_loc_pattern.group(1))
+        location = _clean_fragment(org_loc_pattern.group(2))
+
+    org_only_pattern = re.search(
+        r"\b(?:trabaja en|works at|employee at|empleado en)\s+([A-Za-zÀ-ÿ0-9&.'-][A-Za-zÀ-ÿ0-9&.'\- ]{1,80})$",
+        normalized,
+        flags=re.I,
+    )
+    if org_only_pattern and organization is None:
+        organization = _clean_fragment(org_only_pattern.group(1))
+
     prep_loc = re.search(r"\b(?:in|en|from|based in|located in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,80})$", normalized, flags=re.I)
     if prep_loc:
-        location = prep_loc.group(1).strip()
+        role_loc_candidate = normalized[: prep_loc.start()].strip(" ,.;:-")
+        if role and role_loc_candidate and any(token in role_loc_candidate.casefold() for token in role.split()):
+            location = _clean_fragment(prep_loc.group(1))
+        elif role is None and _looks_role_like(role_loc_candidate):
+            role = _dedupe_tokens(role_loc_candidate.casefold())
+            if role == "sysadmin":
+                role = "system administrator"
+            location = _clean_fragment(prep_loc.group(1))
+        elif location is None:
+            location = _clean_fragment(prep_loc.group(1))
     elif tokens and tokens[-1] in _KNOWN_LOCATION_TOKENS:
         location = words[-1]
     elif any(token in _KNOWN_LOCATION_TOKENS for token in tokens):
@@ -229,9 +310,11 @@ def _parse_context(context: str | None) -> ContextQuery:
         if left and role is None:
             role = left.casefold()
 
-    org_match = re.search(r"\b(?:at|for|with|of)\s+([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&.\- ]{2,60})", normalized)
-    if org_match:
-        organization = org_match.group(1).strip()
+    org_match = re.search(r"\b(?:at|for|with|of|de)\s+([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&.\- ]{2,60})", normalized)
+    if org_match and organization is None:
+        candidate_org = _clean_fragment(org_match.group(1))
+        if candidate_org and not _looks_role_like(candidate_org):
+            organization = candidate_org
 
     if organization is None and role and len(words) >= 2:
         role_tokens = set(role.split())
@@ -257,8 +340,26 @@ def _parse_context(context: str | None) -> ContextQuery:
             inferred_org_tokens.append(original)
         if inferred_org_tokens and any(char.isupper() for char in "".join(inferred_org_tokens)):
             organization = " ".join(inferred_org_tokens).strip()
+    if organization is None:
+        first_token_is_role = tokens[0] in _ROLE_HINTS if tokens else False
+        if len(words) >= 2 and not first_token_is_role:
+            trailing_location_idx = None
+            for idx, token in enumerate(tokens):
+                if token in _KNOWN_LOCATION_TOKENS:
+                    trailing_location_idx = idx
+                    break
+            if trailing_location_idx and trailing_location_idx > 0:
+                org_candidate = _clean_fragment(" ".join(words[:trailing_location_idx]))
+                if org_candidate and not _looks_role_like(org_candidate):
+                    organization = org_candidate
     if organization:
         organization = re.sub(r"\b(founder|cofounder|co-founder|ceo|executive)\b.*$", "", organization, flags=re.I).strip()
+        organization = _clean_fragment(organization)
+        if any(organization.casefold().startswith(prefix) for prefix in _ORG_VERB_PREFIXES):
+            organization = ""
+        organization_tokens = [token.casefold() for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", organization)]
+        if not organization_tokens or all(token in _ORG_LINKING_STOPWORDS for token in organization_tokens) or _looks_role_like(organization):
+            organization = None
     if organization and location and organization.casefold() == location.casefold():
         location = None
 
@@ -305,70 +406,62 @@ def _parse_context(context: str | None) -> ContextQuery:
 def _query_variants(target_name: str, context: str | None) -> list[str]:
     base = target_name.strip()
     if not context:
-        return [base, f"\"{base}\"", f"{base} profile", f"{base} biography", f"{base} official", f"{base} public profile"]
+        return [f"\"{base}\"", f"{base} linkedin", f"{base} profile", base]
     context_data = _parse_context(context)
     context_clean = context.strip() if context else ""
     if not context_clean:
         return [base, f"\"{base}\""]
-    hint_fragments = [context_data.role, context_data.organization, context_data.location, context_data.media_platform, context_data.institutional_hint]
-    compact_hints = " ".join(part for part in hint_fragments if part).strip()
-    private_context = _private_person_context_strength(context_data) >= 1 and not (
-        context_data.media_platform or context_data.institutional_hint
-    )
-    variants = [f"{base} {context_clean}", f"\"{base}\" {context_clean}"]
-    if private_context:
-        if context_data.organization:
-            variants.extend(
-                [
-                    f"\"{base}\" \"{context_data.organization}\"",
-                    f"{base} {context_data.organization} linkedin",
-                    f"{base} {context_data.organization} staff",
-                    f"{base} {context_data.organization} team",
-                    f"{base} {context_data.organization} profile",
-                    f"{base} {context_data.organization} people",
-                ]
-            )
-            if context_data.location:
-                variants.append(f"\"{base}\" \"{context_data.organization}\" \"{context_data.location}\"")
-        if context_data.role:
-            variants.append(f"\"{base}\" \"{context_data.role}\"")
-            if context_data.location:
-                variants.append(f"\"{base}\" \"{context_data.role}\" \"{context_data.location}\"")
-            if context_data.organization:
-                variants.append(f"\"{base}\" \"{context_data.role}\" \"{context_data.organization}\"")
-        if context_data.location:
-            variants.extend([f"{base} {context_data.location} linkedin", f"\"{base}\" \"{context_data.location}\" linkedin"])
-        for marker in _PRIVATE_PROFILE_MARKERS:
-            variants.append(f"{base} {context_clean} {marker}")
-        variants.extend([f"{base} linkedin", f"{base} profile", f"{base} {context_clean} company"])
-    else:
+    variants: list[str] = [f"{base} {context_clean}", f"\"{base}\" {context_clean}"]
+
+    # Identity-first family.
+    variants.extend([f"\"{base}\"", f"{base} linkedin", f"{base} profile", f"{base} perfil"])
+    if context_data.organization:
+        variants.append(f"\"{base}\" \"{context_data.organization}\"")
+        variants.append(f"{base} {context_data.organization} linkedin")
+    if context_data.location:
+        variants.append(f"\"{base}\" \"{context_data.location}\"")
+
+    # Name + role family.
+    if context_data.role:
+        variants.append(f"\"{base}\" \"{context_data.role}\"")
+        variants.append(f"{base} {context_data.role} linkedin")
+        variants.append(f"{base} {context_clean} linkedin")
+        variants.append(f"{base} {context_clean} profile")
+
+    # Name + org + role family.
+    if context_data.organization and context_data.role:
         variants.extend(
             [
-                f"{base} {context_clean} profile",
-                f"{base} {context_clean} biography",
-                f"\"{base}\" {context_clean} site:.edu",
-                f"{base} {context_clean} official",
-                f"{base} {context_clean} public profile",
-                f"\"{base}\" {context_clean} official bio",
-                f"{base} {context_clean} linkedin",
-                f"{base} {context_clean} wikipedia",
-                base,
-                f"\"{base}\"",
-                f"{base} profile",
+                f"\"{base}\" \"{context_data.organization}\" \"{context_data.role}\"",
+                f"{base} {context_data.organization} {context_data.role} linkedin",
             ]
         )
-    if compact_hints:
-        variants.extend(
-            [
-                f"{base} {compact_hints}",
-                f"\"{base}\" {compact_hints} official bio",
-                f"{base} {compact_hints} interview",
-            ]
-        )
+
+    # Name + org + location family.
+    if context_data.organization and context_data.location:
+        variants.append(f"\"{base}\" \"{context_data.organization}\" \"{context_data.location}\"")
+
+    # Name + role + location family.
+    if context_data.role and context_data.location:
+        variants.append(f"\"{base}\" \"{context_data.role}\" \"{context_data.location}\"")
+
+    # Conservatively include raw context and lightweight local-language expansion.
+    variants.append(f"\"{base}\" {context_clean}")
+    if context_data.organization:
+        variants.append(f"{base} {context_data.organization} perfil")
+        variants.append(f"{base} {context_data.organization} empresa")
+        variants.append(f"{base} {context_data.organization} equipo")
+
     if context_data.media_platform:
-        variants.append(f"{base} {context_data.media_platform} channel")
+        variants.append(f"{base} {context_data.media_platform}")
     if context_data.institutional_hint:
-        variants.append(f"{base} {context_data.institutional_hint} staff")
+        variants.append(f"{base} {context_data.institutional_hint} profile")
+
+    # Name-only fallback family.
+    if not (context_data.organization and context_data.location):
+        variants.append(base)
+    variants.append(f"{base} linkedin")
+
     seen: set[str] = set()
     ordered: list[str] = []
     for item in variants:

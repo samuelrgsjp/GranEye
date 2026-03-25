@@ -256,10 +256,36 @@ def test_parse_context_supports_private_person_role_location_and_org_patterns() 
     assert reverse.location == "Spain"
 
 
+def test_parse_context_supports_natural_language_spanish_and_english_patterns() -> None:
+    works_es = _parse_context("trabaja en Netkia en Cantabria")
+    assert works_es.organization == "Netkia"
+    assert works_es.location == "Cantabria"
+    assert works_es.role is None
+
+    works_en = _parse_context("works at Netkia in Cantabria")
+    assert works_en.organization == "Netkia"
+    assert works_en.location == "Cantabria"
+
+    sysadmin = _parse_context("Sysadmin Cantabria")
+    assert sysadmin.role == "system administrator"
+    assert sysadmin.organization is None
+    assert sysadmin.location == "Cantabria"
+
+    support = _parse_context("soporte IT España")
+    assert support.role == "soporte it"
+    assert support.organization is None
+    assert support.location == "España"
+
+    admin_loc = _parse_context("administrador de sistemas en Cantabria")
+    assert admin_loc.role == "administrador de sistemas"
+    assert admin_loc.location == "Cantabria"
+    assert admin_loc.organization is None
+
+
 def test_query_variants_expand_beyond_professional_context() -> None:
     variants = _query_variants("Penélope Cruz", "Actress")
     assert "Penélope Cruz Actress linkedin" in variants
-    assert "Penélope Cruz Actress team" in variants
+    assert "\"Penélope Cruz\" \"actress\"" in variants
     assert "Penélope Cruz Actress profile" in variants
     assert "Penélope Cruz linkedin" in variants
 
@@ -269,8 +295,8 @@ def test_query_variants_for_private_context_prioritize_company_and_profile_patte
     assert "\"Samuel Ruiz García\" \"Netkia\"" in variants
     assert "\"Samuel Ruiz García\" \"Netkia\" \"Cantabria\"" in variants
     assert "Samuel Ruiz García Netkia linkedin" in variants
-    assert "Samuel Ruiz García Netkia staff" in variants
-    assert "Samuel Ruiz García Netkia team" in variants
+    assert "Samuel Ruiz García Netkia perfil" in variants
+    assert "Samuel Ruiz García Netkia empresa" in variants
     assert "Samuel Ruiz García Netkia Cantabria wikipedia" not in variants
 
 
