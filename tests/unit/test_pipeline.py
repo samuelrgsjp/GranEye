@@ -79,6 +79,7 @@ def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
     assert diagnostics.filtered_results_count == 1
     assert diagnostics.ranked_candidates_count == len(ranked)
     assert diagnostics.query_attempts[0] == "Satya Nadella Microsoft CEO"
+    assert diagnostics.query_validity == "valid"
     assert any(decision.reason == "search_engine_or_internal" for decision in diagnostics.filter_decisions)
     assert diagnostics.ranked_candidates
     assert diagnostics.source_diversity_count >= 1
@@ -133,3 +134,16 @@ def test_query_variants_expand_beyond_professional_context() -> None:
     assert "Penélope Cruz Actress official" in variants
     assert "Penélope Cruz Actress wikipedia" in variants
     assert "\"Penélope Cruz\" Actress official bio" in variants
+
+
+def test_resolve_query_with_debug_marks_invalid_short_query() -> None:
+    output, ranked, diagnostics = resolve_query_with_debug(
+        "a",
+        context=None,
+        html_search=lambda _q: [{"title": "A profile", "url": "https://example.com/a-profile", "snippet": "profile"}],
+        instant_search=lambda _q: [],
+    )
+    assert output is not None
+    assert ranked
+    assert diagnostics.query_validity == "too_short"
+    assert output.confidence_label == "low"

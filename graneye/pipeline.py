@@ -9,7 +9,14 @@ from .analyzers.base import Analyzer
 from .clustering import cluster_identities
 from .detection import is_directory_url
 from .models import AnalysisResult, IdentityCluster, ProfileRecord
-from .resolution import ContextQuery, ResolutionOutput, ScoredCandidate, rank_candidates, resolve_identity
+from .resolution import (
+    ContextQuery,
+    ResolutionOutput,
+    ScoredCandidate,
+    assess_query_validity,
+    rank_candidates,
+    resolve_identity,
+)
 from .search import (
     FilterDecision,
     SearchResult,
@@ -31,6 +38,7 @@ class SearchPipelineDiagnostics:
     ambiguity_triggered: bool = False
     ambiguity_reason: str = ""
     context_interpretation: str = ""
+    query_validity: str = "valid"
 
 
 def analyze_records(
@@ -378,5 +386,6 @@ def resolve_query_with_debug(
             f"platform={parsed_context.media_platform or '-'}; institutional={parsed_context.institutional_hint or '-'}; "
             f"generic={','.join(parsed_context.generic_terms[:6]) if parsed_context.generic_terms else '-'}"
         ),
+        query_validity=assess_query_validity(target_name).status,
     )
     return resolved, ranked, diagnostics
