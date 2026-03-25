@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
-from .resolution import ResolutionOutput
+from .resolution import ResolutionOutput, assess_query_validity
 from .search import search_duckduckgo_html, search_duckduckgo_instant_answer
 
 
@@ -12,6 +13,7 @@ class CLIArgs(argparse.Namespace):
     target_name: str
     target_context: str | None
     debug: bool
+    json: bool
 
 
 def _parse_args(argv: list[str] | None = None) -> CLIArgs:
@@ -31,6 +33,11 @@ def _parse_args(argv: list[str] | None = None) -> CLIArgs:
         action="store_true",
         help="Show search pipeline diagnostics and per-result filter decisions.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Return stable machine-readable JSON output.",
+    )
 
     namespace = parser.parse_args(argv, namespace=CLIArgs())
     return namespace
@@ -41,6 +48,30 @@ def _is_blank(value: str | None) -> bool:
 
 
 def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
+    if output.no_resolution:
+        lines = [
+            f"Name: {target_name}",
+            f"Context: {target_context}" if target_context else "Context: (none)",
+            f"Status: {'ambiguous' if output.ambiguity_detected else 'no-resolution'}",
+            f"Confidence: {output.confidence_label}",
+            f"Top candidate: {output.normalized_candidate_name or '(none)'}",
+            f"Source URL: {output.source_url or '(none)'}",
+            f"Reason: {output.no_resolution_reason or output.ambiguity_reason or output.explanation}",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        f"Name: {target_name}",
+        f"Context: {target_context}" if target_context else "Context: (none)",
+        "Status: resolved",
+        f"Confidence: {output.confidence_label}",
+        f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
+        f"Source URL: {output.source_url}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_debug_result_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
     if output.no_resolution:
         lines = [
             f"Target name: {target_name}",
@@ -71,60 +102,142 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
     return "\n".join(lines)
 
 
+def _resolution_status(output: ResolutionOutput | None) -> str:
+    if output is None:
+        return "resolved"
+    if output.ambiguity_detected:
+        return "ambiguous"
+    if output.no_resolution:
+        return "no-resolution"
+    return "resolved"
+
+
+def _json_payload(
+    *,
+    target_name: str,
+    target_context: str | None,
+    query_validity: str,
+    output: ResolutionOutput | None,
+    has_ranked_candidates: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "target_name": target_name,
+        "target_context": target_context,
+        "query_validity": query_validity,
+        "resolution_status": _resolution_status(output),
+        "no_resolution_reason": output.no_resolution_reason if output else None,
+        "ambiguity_reason": output.ambiguity_reason if output else None,
+        "confidence": output.confidence_label if output else "low",
+        "top_candidate": output.normalized_candidate_name if output else None,
+        "source_url": output.source_url if output else None,
+        "display_title": output.source_title if output else None,
+        "same_person_probability": output.same_person_probability if output else None,
+        "context_match_probability": output.context_match_probability if output else None,
+        "entity_type": output.entity_type if output else None,
+        "decision_reason": output.explanation if output else ("content fetch failed; using ranked search evidence only." if has_ranked_candidates else "no candidates"),
+    }
+    return payload
+
+
+def _exit_code(output: ResolutionOutput | None, ranked_count: int) -> int:
+    if ranked_count == 0:
+        return 2
+    if output is None:
+        return 0
+    if output.ambiguity_detected:
+        return 1
+    if output.no_resolution:
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     if _is_blank(args.target_name):
         print("Error: target_name must not be empty.", file=sys.stderr)
-        return 2
+        return 3
 
+    target_name = args.target_name.strip()
     context = args.target_context.strip() if args.target_context else None
+    query_validity = assess_query_validity(target_name).status
 
     diagnostics: SearchPipelineDiagnostics | None = None
     try:
         if args.debug:
             output, ranked, diagnostics = resolve_query_with_debug(
-                args.target_name.strip(),
+                target_name,
                 context=context,
                 html_search=search_duckduckgo_html,
                 instant_search=search_duckduckgo_instant_answer,
             )
         else:
             output, ranked = resolve_query(
-                args.target_name.strip(),
+                target_name,
                 context=context,
                 html_search=search_duckduckgo_html,
                 instant_search=search_duckduckgo_instant_answer,
             )
     except Exception as exc:  # pragma: no cover - defensive path
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
-        return 1
+        return 3
 
     if args.debug and diagnostics is not None:
         print(_render_debug_output(diagnostics))
 
+    if args.json:
+        payload = _json_payload(
+            target_name=target_name,
+            target_context=context,
+            query_validity=query_validity,
+            output=output,
+            has_ranked_candidates=bool(ranked),
+        )
+        if output is None and ranked:
+            top = ranked[0]
+            payload["top_candidate"] = top.result.title or top.result.domain
+            payload["source_url"] = top.result.url
+            payload["display_title"] = top.result.title or None
+            payload["same_person_probability"] = top.score
+            payload["context_match_probability"] = top.context_strength
+            payload["entity_type"] = top.entity_type
+        print(json.dumps(payload, ensure_ascii=False))
+        return _exit_code(output, len(ranked))
+
     if not ranked:
-        print(f"No candidates found for '{args.target_name.strip()}'.")
-        return 3
+        print(
+            "\n".join(
+                [
+                    f"Name: {target_name}",
+                    f"Context: {context}" if context else "Context: (none)",
+                    "Status: no-resolution",
+                    "Confidence: low",
+                    "Top candidate: (none)",
+                    "Source URL: (none)",
+                    "Reason: no candidates found",
+                ]
+            )
+        )
+        return 2
 
     if output is None:
         top = ranked[0]
         print(
             "\n".join(
                 [
-                    f"Target name: {args.target_name.strip()}",
-                    f"Target context: {context}" if context else "Target context: (none)",
-                    f"Top candidate (search-only): {top.result.title or top.result.domain}",
+                    f"Name: {target_name}",
+                    f"Context: {context}" if context else "Context: (none)",
+                    "Status: resolved",
+                    "Confidence: low",
+                    f"Top candidate: {top.result.title or top.result.domain}",
                     f"Source URL: {top.result.url}",
-                    f"Score: {top.score:.3f}",
-                    "Decision reason: content fetch failed; using ranked search evidence only.",
                 ]
             )
         )
         return 0
 
-    print(_render_output(args.target_name.strip(), context, output))
-    return 0
+    print(_render_debug_result_output(target_name, context, output) if args.debug else _render_output(target_name, context, output))
+    return _exit_code(output, len(ranked))
 
 
 def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:

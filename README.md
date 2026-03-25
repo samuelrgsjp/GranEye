@@ -32,8 +32,20 @@ Notes:
 - `target_name` is required.
 - `target_context` is optional and can be broad (for example: `Lawyer Barcelona`, `Actress`, `YouTuber Spain`, `University professor Madrid`, `TV personality`).
 - Use `graneye --help` for argument details.
-- CLI output includes `Resolution path` (`full_content`, `partial_content`, `search_only`, or `fetch_blocked`) and `Fetch status`.
-- `--debug` prints query attempts, context interpretation, source diversity, raw/normalized/filtered/ranked counts, discarded candidates with reasons, retained candidates, and scored ranking signals.
+- Default CLI output is concise and human-readable (`Name`, `Context`, `Status`, `Confidence`, `Top candidate`, `Source URL`; `Reason` appears for `ambiguous`/`no-resolution`).
+- `--debug` keeps the existing detailed diagnostics and verbose decision fields (including resolution path, fetch status, and scoring details).
+- `--json` returns stable machine-readable output with keys:
+  - `target_name`, `target_context`, `query_validity`, `resolution_status`
+  - `no_resolution_reason`, `ambiguity_reason`, `confidence`
+  - `top_candidate`, `source_url`, `display_title`
+  - `same_person_probability`, `context_match_probability`, `entity_type`, `decision_reason`
+
+### Resolution States and Exit Codes
+
+- `resolved` → process exit code `0`
+- `ambiguous` → process exit code `1`
+- `no-resolution` → process exit code `2`
+- invalid usage / CLI runtime error → process exit code `3`
 
 ### Source Categories
 

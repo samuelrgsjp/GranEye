@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import runpy
 
 import pytest
@@ -52,6 +53,7 @@ def test_parse_args_supports_optional_context() -> None:
     assert parsed.target_name == "Laura Gómez Martínez"
     assert parsed.target_context == "Lawyer Barcelona"
     assert parsed.debug is False
+    assert parsed.json is False
 
 
 def test_parse_args_supports_debug_flag() -> None:
@@ -59,11 +61,16 @@ def test_parse_args_supports_debug_flag() -> None:
     assert parsed.debug is True
 
 
+def test_parse_args_supports_json_flag() -> None:
+    parsed = cli._parse_args(["Laura Gómez Martínez", "--json"])
+    assert parsed.json is True
+
+
 @pytest.mark.parametrize(
     ("argv", "expected_code", "expected_text"),
     [
         (["Laura Gómez Martínez", "Lawyer Barcelona"], 0, "Top candidate: laura gomez martinez"),
-        (["Laura Gómez Martínez"], 0, "Target context: (none)"),
+        (["Laura Gómez Martínez"], 0, "Context: (none)"),
     ],
 )
 def test_main_prints_candidate_output(
@@ -80,10 +87,11 @@ def test_main_prints_candidate_output(
 
     assert code == expected_code
     assert expected_text in captured.out
+    assert "Status: resolved" in captured.out
     assert "Source URL:" in captured.out
-    assert "Score:" in captured.out
-    assert "Resolution path:" in captured.out
-    assert "Decision reason:" in captured.out
+    assert "Score:" not in captured.out
+    assert "Resolution path:" not in captured.out
+    assert "Decision reason:" not in captured.out
 
 
 def test_main_returns_not_found_when_no_candidates(
@@ -95,8 +103,8 @@ def test_main_returns_not_found_when_no_candidates(
     code = cli.main(["Laura Gómez Martínez"])
     captured = capsys.readouterr()
 
-    assert code == 3
-    assert "No candidates found" in captured.out
+    assert code == 2
+    assert "Status: no-resolution" in captured.out
 
 
 def test_main_falls_back_to_search_only_when_resolution_missing(
@@ -109,8 +117,8 @@ def test_main_falls_back_to_search_only_when_resolution_missing(
     captured = capsys.readouterr()
 
     assert code == 0
-    assert "Top candidate (search-only):" in captured.out
-    assert "using ranked search evidence only" in captured.out
+    assert "Status: resolved" in captured.out
+    assert "Top candidate:" in captured.out
 
 
 def test_main_handles_runtime_failure(
@@ -125,7 +133,7 @@ def test_main_handles_runtime_failure(
     code = cli.main(["Laura Gómez Martínez"])
     captured = capsys.readouterr()
 
-    assert code == 1
+    assert code == 3
     assert "failed to execute pipeline" in captured.err
 
 
@@ -149,7 +157,7 @@ def test_main_rejects_blank_target_name(capsys: pytest.CaptureFixture[str]) -> N
     code = cli.main(["   "])
     captured = capsys.readouterr()
 
-    assert code == 2
+    assert code == 3
     assert "target_name must not be empty" in captured.err
 
 
@@ -178,6 +186,7 @@ def test_main_debug_prints_pipeline_counts(
     assert "Raw results count: 5" in captured.out
     assert "Filtered results count: 3" in captured.out
     assert "Ranked candidates:" in captured.out
+    assert "Decision reason:" in captured.out
 
 
 def test_main_uses_selected_representative_title_not_ranked_first_title(
@@ -199,10 +208,72 @@ def test_main_uses_selected_representative_title_not_ranked_first_title(
         explanation=output.explanation,
     )
     ranked = _fake_ranked("https://business-news-today.example.com/about-nvidia")
-    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, ranked))
+    diagnostics = cli.SearchPipelineDiagnostics(
+        raw_results_count=1,
+        normalized_results_count=1,
+        filtered_results_count=1,
+        ranked_candidates_count=1,
+        filter_decisions=(),
+        ranked_candidates=tuple(ranked),
+    )
+    monkeypatch.setattr(cli, "resolve_query_with_debug", lambda *_args, **_kwargs: (output, ranked, diagnostics))
 
-    code = cli.main(["Jensen Huang", "NVIDIA CEO"])
+    code = cli.main(["Jensen Huang", "NVIDIA CEO", "--debug"])
     captured = capsys.readouterr()
 
     assert code == 0
     assert "Display title: Jensen Huang - Founder and CEO" in captured.out
+
+
+def test_main_returns_ambiguous_exit_code(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    output = ResolutionOutput(
+        normalized_candidate_name="jane doe",
+        source_url="https://example.org/jane",
+        source_title="Jane Doe - Example",
+        final_score=0.62,
+        entity_type="person_profile",
+        same_person_probability=0.62,
+        context_match_probability=0.30,
+        possible_role=None,
+        possible_organization=None,
+        possible_location=None,
+        explanation="AMBIGUOUS: close candidates.",
+        ambiguity_detected=True,
+        ambiguity_reason="multiple_plausible_candidates",
+        no_resolution=True,
+        no_resolution_reason="multiple_plausible_candidates",
+    )
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, _fake_ranked()))
+
+    code = cli.main(["Jane Doe"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Status: ambiguous" in captured.out
+
+
+def test_main_json_output_has_expected_keys(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+
+    code = cli.main(["Laura Gómez Martínez", "Lawyer Barcelona", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 0
+    expected_keys = {
+        "target_name",
+        "target_context",
+        "query_validity",
+        "resolution_status",
+        "no_resolution_reason",
+        "ambiguity_reason",
+        "confidence",
+        "top_candidate",
+        "source_url",
+        "display_title",
+        "same_person_probability",
+        "context_match_probability",
+        "entity_type",
+        "decision_reason",
+    }
+    assert expected_keys.issubset(payload.keys())
+    assert payload["resolution_status"] == "resolved"
