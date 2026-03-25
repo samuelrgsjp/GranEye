@@ -25,6 +25,33 @@ def test_resolve_query_merges_html_and_instant_results_without_duplicates() -> N
     assert "https://en.wikipedia.org/wiki/Jane_Doe" in urls
 
 
+def test_resolve_query_deterministic_under_source_order_permutations() -> None:
+    html_results = [
+        {"title": "Jane Doe - Team", "url": "https://www.example.org/team/jane-doe", "snippet": "Team profile"},
+        {"title": "Jane Doe - Team", "url": "https://www.example.com/team/jane-doe", "snippet": "Team profile"},
+    ]
+    instant_results = list(reversed(html_results))
+
+    first_output, first_ranked = resolve_query(
+        "Jane Doe",
+        context="Engineer",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: instant_results,
+    )
+    second_output, second_ranked = resolve_query(
+        "Jane Doe",
+        context="Engineer",
+        html_search=lambda _q: instant_results,
+        instant_search=lambda _q: html_results,
+    )
+
+    assert first_output is not None
+    assert second_output is not None
+    assert [item.result.url for item in first_ranked] == [item.result.url for item in second_ranked]
+    assert first_output.source_url == second_output.source_url
+    assert first_output.no_resolution == second_output.no_resolution
+
+
 def test_resolve_query_returns_no_output_when_all_searches_empty() -> None:
     output, ranked = resolve_query(
         "Jane Doe",

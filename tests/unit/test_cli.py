@@ -424,21 +424,52 @@ def test_invalid_query_reports_no_resolution_in_human_and_json(
 
 
 def test_repeated_serialization_of_same_final_output_is_stable() -> None:
-    output = _fake_output()
-    first = cli._json_payload(
+    finalized = cli.FinalizedQueryResult(
         target_name="Laura Gómez Martínez",
         target_context="Lawyer Barcelona",
         query_validity="valid",
-        output=output,
+        output=_fake_output(),
+        status="resolved",
     )
-    second = cli._json_payload(
-        target_name="Laura Gómez Martínez",
-        target_context="Lawyer Barcelona",
-        query_validity="valid",
-        output=output,
-    )
+    first = cli._json_payload(finalized)
+    second = cli._json_payload(finalized)
     assert first == second
-    assert cli._resolution_status(output) == "resolved"
+    assert first["resolution_status"] == "resolved"
+
+
+def test_human_and_json_share_status_for_ambiguous_case(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = ResolutionOutput(
+        normalized_candidate_name="jane doe",
+        source_url="https://example.org/jane",
+        source_title="Jane Doe - Example",
+        final_score=0.62,
+        entity_type="person_profile",
+        same_person_probability=0.62,
+        context_match_probability=0.30,
+        possible_role=None,
+        possible_organization=None,
+        possible_location=None,
+        explanation="AMBIGUOUS: close candidates.",
+        ambiguity_detected=True,
+        ambiguity_reason="multiple_plausible_candidates",
+        no_resolution=False,
+        no_resolution_reason=None,
+    )
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, _fake_ranked()))
+
+    human_code = cli.main(["Jane Doe"])
+    human = capsys.readouterr()
+    assert human_code == 1
+    assert "Status: ambiguous" in human.out
+
+    json_code = cli.main(["Jane Doe", "--json"])
+    machine = capsys.readouterr()
+    payload = json.loads(machine.out)
+    assert json_code == 1
+    assert payload["resolution_status"] == "ambiguous"
 
 
 def test_batch_file_jsonl_processes_multiple_rows(
@@ -500,6 +531,54 @@ def test_batch_stdin_human_output_has_readable_block_format(
     assert "Top candidate: laura gomez martinez" in captured.out
     assert "[2] Satya Nadella | (none)" in captured.out
     assert "\n---\n" not in captured.out
+
+
+def test_batch_human_and_jsonl_share_record_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _resolve(name: str, **_kwargs: object) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
+        if name == "Carlos Pérez":
+            return (
+                ResolutionOutput(
+                    normalized_candidate_name="",
+                    source_url="",
+                    source_title="",
+                    final_score=0.0,
+                    entity_type="unknown",
+                    same_person_probability=0.0,
+                    context_match_probability=0.0,
+                    possible_role=None,
+                    possible_organization=None,
+                    possible_location=None,
+                    explanation="NO_RESOLUTION: insufficient evidence",
+                    no_resolution=True,
+                    no_resolution_reason="insufficient_evidence",
+                    confidence_label="low",
+                ),
+                [],
+            )
+        return _fake_output(), _fake_ranked()
+
+    monkeypatch.setattr(cli, "resolve_query", _resolve)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Jensen Huang\tNVIDIA CEO\nCarlos Pérez\tCybersecurity Spain\n"))
+    human_code = cli.main(["--batch"])
+    human = capsys.readouterr()
+    assert human_code == 0
+    assert "[1] Jensen Huang | NVIDIA CEO" in human.out
+    assert "Status: resolved" in human.out
+    assert "[2] Carlos Pérez | Cybersecurity Spain" in human.out
+    assert "Status: no-resolution" in human.out
+    assert "Reason: insufficient_evidence" in human.out
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Jensen Huang\tNVIDIA CEO\nCarlos Pérez\tCybersecurity Spain\n"))
+    json_code = cli.main(["--batch", "--jsonl"])
+    machine = capsys.readouterr()
+    payloads = [json.loads(line) for line in machine.out.splitlines() if line.strip()]
+    assert json_code == 0
+    assert payloads[0]["resolution_status"] == "resolved"
+    assert payloads[1]["resolution_status"] == "no-resolution"
+    assert payloads[1]["no_resolution_reason"] == "insufficient_evidence"
 
 
 def test_batch_per_record_failure_does_not_abort(
