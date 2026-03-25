@@ -29,6 +29,15 @@ class BatchRecord:
     target_context: str | None
 
 
+@dataclass(frozen=True)
+class FinalizedQueryResult:
+    target_name: str
+    target_context: str | None
+    query_validity: str
+    output: ResolutionOutput
+    status: str
+
+
 def _parse_args(argv: list[str] | None = None) -> CLIArgs:
     parser = argparse.ArgumentParser(
         prog="graneye",
@@ -75,27 +84,27 @@ def _is_blank(value: str | None) -> bool:
     return value is None or not value.strip()
 
 
-def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
-    status = _resolution_status(output)
+def _render_output(result: FinalizedQueryResult) -> str:
+    status = result.status
     if status != "resolved":
         lines = [
-            f"Name: {target_name}",
-            f"Context: {target_context}" if target_context else "Context: (none)",
+            f"Name: {result.target_name}",
+            f"Context: {result.target_context}" if result.target_context else "Context: (none)",
             f"Status: {status}",
-            f"Confidence: {output.confidence_label}",
-            f"Top candidate: {output.normalized_candidate_name or '(none)'}",
-            f"Source URL: {output.source_url or '(none)'}",
-            f"Reason: {output.no_resolution_reason or output.ambiguity_reason or output.explanation}",
+            f"Confidence: {result.output.confidence_label}",
+            f"Top candidate: {result.output.normalized_candidate_name or '(none)'}",
+            f"Source URL: {result.output.source_url or '(none)'}",
+            f"Reason: {result.output.no_resolution_reason or result.output.ambiguity_reason or result.output.explanation}",
         ]
         return "\n".join(lines)
 
     lines = [
-        f"Name: {target_name}",
-        f"Context: {target_context}" if target_context else "Context: (none)",
+        f"Name: {result.target_name}",
+        f"Context: {result.target_context}" if result.target_context else "Context: (none)",
         "Status: resolved",
-        f"Confidence: {output.confidence_label}",
-        f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
-        f"Source URL: {output.source_url}",
+        f"Confidence: {result.output.confidence_label}",
+        f"Top candidate: {result.output.normalized_candidate_name or '(unknown)'}",
+        f"Source URL: {result.output.source_url}",
     ]
     return "\n".join(lines)
 
@@ -103,20 +112,17 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
 def _render_batch_human_output(
     *,
     input_index: int,
-    target_name: str,
-    target_context: str | None,
-    output: ResolutionOutput,
+    result: FinalizedQueryResult,
     error: str | None,
 ) -> str:
-    status = _resolution_status(output)
     lines = [
-        f"[{input_index}] {target_name} | {target_context or '(none)'}",
-        f"Status: {status}",
-        f"Confidence: {output.confidence_label}",
-        f"Top candidate: {output.normalized_candidate_name or '(none)'}",
-        f"Source URL: {output.source_url or '(none)'}",
+        f"[{input_index}] {result.target_name} | {result.target_context or '(none)'}",
+        f"Status: {result.status}",
+        f"Confidence: {result.output.confidence_label}",
+        f"Top candidate: {result.output.normalized_candidate_name or '(none)'}",
+        f"Source URL: {result.output.source_url or '(none)'}",
     ]
-    reason = output.no_resolution_reason or output.ambiguity_reason
+    reason = result.output.no_resolution_reason or result.output.ambiguity_reason
     if reason:
         lines.append(f"Reason: {reason}")
     if error:
@@ -124,34 +130,34 @@ def _render_batch_human_output(
     return "\n".join(lines)
 
 
-def _render_debug_result_output(target_name: str, target_context: str | None, output: ResolutionOutput) -> str:
-    status = _resolution_status(output)
+def _render_debug_result_output(result: FinalizedQueryResult) -> str:
+    status = result.status
     if status != "resolved":
         lines = [
-            f"Target name: {target_name}",
-            f"Target context: {target_context}" if target_context else "Target context: (none)",
+            f"Target name: {result.target_name}",
+            f"Target context: {result.target_context}" if result.target_context else "Target context: (none)",
             f"Resolution: {status}",
-            f"Reason: {output.no_resolution_reason or output.ambiguity_reason or 'unknown'}",
-            f"Confidence: {output.confidence_label}",
-            f"Decision reason: {output.explanation}",
+            f"Reason: {result.output.no_resolution_reason or result.output.ambiguity_reason or 'unknown'}",
+            f"Confidence: {result.output.confidence_label}",
+            f"Decision reason: {result.output.explanation}",
         ]
         return "\n".join(lines)
 
     lines = [
-        f"Target name: {target_name}",
-        f"Target context: {target_context}" if target_context else "Target context: (none)",
-        f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
-        f"Source URL: {output.source_url}",
-        f"Display title: {output.source_title or '(not available)'}",
-        f"Score: {output.final_score:.3f}",
-        f"Same-person probability: {output.same_person_probability:.3f}",
-        f"Context match probability: {output.context_match_probability:.3f}",
-        f"Confidence: {output.confidence_label}",
-        f"Ambiguity detected: {'yes' if output.ambiguity_detected else 'no'}",
-        f"Ambiguity reason: {output.ambiguity_reason or '(none)'}",
-        f"Resolution path: {output.resolution_path}",
-        f"Fetch status: {output.fetch_status}",
-        f"Decision reason: {output.explanation}",
+        f"Target name: {result.target_name}",
+        f"Target context: {result.target_context}" if result.target_context else "Target context: (none)",
+        f"Top candidate: {result.output.normalized_candidate_name or '(unknown)'}",
+        f"Source URL: {result.output.source_url}",
+        f"Display title: {result.output.source_title or '(not available)'}",
+        f"Score: {result.output.final_score:.3f}",
+        f"Same-person probability: {result.output.same_person_probability:.3f}",
+        f"Context match probability: {result.output.context_match_probability:.3f}",
+        f"Confidence: {result.output.confidence_label}",
+        f"Ambiguity detected: {'yes' if result.output.ambiguity_detected else 'no'}",
+        f"Ambiguity reason: {result.output.ambiguity_reason or '(none)'}",
+        f"Resolution path: {result.output.resolution_path}",
+        f"Fetch status: {result.output.fetch_status}",
+        f"Decision reason: {result.output.explanation}",
     ]
     return "\n".join(lines)
 
@@ -245,28 +251,22 @@ def _build_final_output(
     )
 
 
-def _json_payload(
-    *,
-    target_name: str,
-    target_context: str | None,
-    query_validity: str,
-    output: ResolutionOutput,
-) -> dict[str, object]:
+def _json_payload(result: FinalizedQueryResult) -> dict[str, object]:
     payload: dict[str, object] = {
-        "target_name": target_name,
-        "target_context": target_context,
-        "query_validity": query_validity,
-        "resolution_status": _resolution_status(output),
-        "no_resolution_reason": output.no_resolution_reason,
-        "ambiguity_reason": output.ambiguity_reason,
-        "confidence": output.confidence_label,
-        "top_candidate": output.normalized_candidate_name or None,
-        "source_url": output.source_url or None,
-        "display_title": output.source_title or None,
-        "same_person_probability": output.same_person_probability,
-        "context_match_probability": output.context_match_probability,
-        "entity_type": output.entity_type,
-        "decision_reason": output.explanation,
+        "target_name": result.target_name,
+        "target_context": result.target_context,
+        "query_validity": result.query_validity,
+        "resolution_status": result.status,
+        "no_resolution_reason": result.output.no_resolution_reason,
+        "ambiguity_reason": result.output.ambiguity_reason,
+        "confidence": result.output.confidence_label,
+        "top_candidate": result.output.normalized_candidate_name or None,
+        "source_url": result.output.source_url or None,
+        "display_title": result.output.source_title or None,
+        "same_person_probability": result.output.same_person_probability,
+        "context_match_probability": result.output.context_match_probability,
+        "entity_type": result.output.entity_type,
+        "decision_reason": result.output.explanation,
     }
     return payload
 
@@ -274,18 +274,10 @@ def _json_payload(
 def _batch_json_payload(
     *,
     input_index: int,
-    target_name: str,
-    target_context: str | None,
-    query_validity: str,
-    output: ResolutionOutput,
+    result: FinalizedQueryResult,
     error: str | None = None,
 ) -> dict[str, object]:
-    payload = _json_payload(
-        target_name=target_name,
-        target_context=target_context,
-        query_validity=query_validity,
-        output=output,
-    )
+    payload = _json_payload(result)
     payload["input_index"] = input_index
     payload["error"] = error
     return payload
@@ -337,7 +329,7 @@ def _read_batch_records(args: CLIArgs) -> list[BatchRecord]:
     ]
 
 
-def _process_query(target_name: str, context: str | None, debug: bool) -> tuple[ResolutionOutput, SearchPipelineDiagnostics | None]:
+def _process_query(target_name: str, context: str | None, debug: bool) -> tuple[FinalizedQueryResult, SearchPipelineDiagnostics | None]:
     diagnostics: SearchPipelineDiagnostics | None = None
     if debug:
         resolved_output, ranked, diagnostics = resolve_query_with_debug(
@@ -359,7 +351,13 @@ def _process_query(target_name: str, context: str | None, debug: bool) -> tuple[
         resolved=resolved_output,
         ranked=ranked,
     )
-    return final_output, diagnostics
+    return FinalizedQueryResult(
+        target_name=target_name,
+        target_context=context,
+        query_validity=query_validity,
+        output=final_output,
+        status=_resolution_status(final_output),
+    ), diagnostics
 
 
 def _empty_error_output(error_text: str) -> ResolutionOutput:
@@ -385,8 +383,7 @@ def _empty_error_output(error_text: str) -> ResolutionOutput:
     )
 
 
-def _exit_code(output: ResolutionOutput) -> int:
-    status = _resolution_status(output)
+def _exit_code(status: str) -> int:
     if status == "ambiguous":
         return 1
     if status == "no-resolution":
@@ -394,9 +391,15 @@ def _exit_code(output: ResolutionOutput) -> int:
     return 0
 
 
-def _validate_mode_flags(args: CLIArgs) -> int | None:
+def _validate_mode_flags(args: CLIArgs, *, batch_mode: bool) -> int | None:
     if args.json and args.jsonl:
         print("Error: use either --json or --jsonl, not both.", file=sys.stderr)
+        return 3
+    if batch_mode and args.json:
+        print("Error: --json is for single-query mode; use --jsonl for batch mode.", file=sys.stderr)
+        return 3
+    if not batch_mode and args.jsonl:
+        print("Error: --jsonl is for batch mode only.", file=sys.stderr)
         return 3
     return None
 
@@ -408,10 +411,6 @@ def _run_batch_mode(args: CLIArgs) -> int:
     if args.debug:
         print("Error: --debug is only available in single-query mode.", file=sys.stderr)
         return 3
-    if args.json:
-        print("Error: --json is for single-query mode; use --jsonl for batch mode.", file=sys.stderr)
-        return 3
-
     try:
         records = _read_batch_records(args)
     except Exception as exc:
@@ -419,26 +418,25 @@ def _run_batch_mode(args: CLIArgs) -> int:
         return 3
 
     for record in records:
-        record_output: ResolutionOutput
+        finalized: FinalizedQueryResult
         try:
-            record_output, _ = _process_query(record.target_name, record.target_context, debug=False)
-            query_validity = assess_query_validity(record.target_name).status
+            finalized, _ = _process_query(record.target_name, record.target_context, debug=False)
             payload = _batch_json_payload(
                 input_index=record.input_index,
-                target_name=record.target_name,
-                target_context=record.target_context,
-                query_validity=query_validity,
-                output=record_output,
+                result=finalized,
                 error=None,
             )
         except Exception as exc:  # pragma: no cover - defensive path
-            record_output = _empty_error_output(str(exc))
-            payload = _batch_json_payload(
-                input_index=record.input_index,
+            finalized = FinalizedQueryResult(
                 target_name=record.target_name,
                 target_context=record.target_context,
                 query_validity="unknown",
-                output=record_output,
+                output=_empty_error_output(str(exc)),
+                status="no-resolution",
+            )
+            payload = _batch_json_payload(
+                input_index=record.input_index,
+                result=finalized,
                 error=str(exc),
             )
         if args.jsonl:
@@ -448,9 +446,7 @@ def _run_batch_mode(args: CLIArgs) -> int:
         print(
             _render_batch_human_output(
                 input_index=record.input_index,
-                target_name=record.target_name,
-                target_context=record.target_context,
-                output=record_output,
+                result=finalized,
                 error=payload["error"] if isinstance(payload["error"], str) else None,
             )
         )
@@ -459,10 +455,6 @@ def _run_batch_mode(args: CLIArgs) -> int:
 
 
 def _run_single_mode(args: CLIArgs) -> int:
-    if args.jsonl:
-        print("Error: --jsonl is for batch mode only.", file=sys.stderr)
-        return 3
-
     if _is_blank(args.target_name):
         print("Error: target_name must not be empty.", file=sys.stderr)
         return 3
@@ -472,41 +464,34 @@ def _run_single_mode(args: CLIArgs) -> int:
 
     diagnostics: SearchPipelineDiagnostics | None = None
     try:
-        final_output, diagnostics = _process_query(target_name, context, args.debug)
+        finalized, diagnostics = _process_query(target_name, context, args.debug)
     except Exception as exc:  # pragma: no cover - defensive path
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
         return 3
-
-    query_validity = assess_query_validity(target_name).status
 
     if args.debug and diagnostics is not None:
         print(_render_debug_output(diagnostics))
 
     if args.json:
-        payload = _json_payload(
-            target_name=target_name,
-            target_context=context,
-            query_validity=query_validity,
-            output=final_output,
-        )
+        payload = _json_payload(finalized)
         print(json.dumps(payload, ensure_ascii=False))
-        return _exit_code(final_output)
+        return _exit_code(finalized.status)
 
     print(
-        _render_debug_result_output(target_name, context, final_output)
+        _render_debug_result_output(finalized)
         if args.debug
-        else _render_output(target_name, context, final_output)
+        else _render_output(finalized)
     )
-    return _exit_code(final_output)
+    return _exit_code(finalized.status)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    validation_error = _validate_mode_flags(args)
+    batch_mode = bool(args.input_file or args.batch)
+    validation_error = _validate_mode_flags(args, batch_mode=batch_mode)
     if validation_error is not None:
         return validation_error
 
-    batch_mode = bool(args.input_file or args.batch)
     return _run_batch_mode(args) if batch_mode else _run_single_mode(args)
 
 

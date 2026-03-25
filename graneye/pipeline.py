@@ -286,9 +286,7 @@ def _run_search(
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[list[Mapping[str, str]], tuple[str, ...]]:
-    combined_results: list[Mapping[str, str]] = []
-    seen_urls: set[str] = set()
-    seen_signatures: set[tuple[str, str]] = set()
+    candidate_pool: list[tuple[str, str, str, str, Mapping[str, str]]] = []
     attempted_queries: list[str] = []
     for query_text in query_texts:
         attempted_queries.append(query_text)
@@ -317,28 +315,30 @@ def _run_search(
                     pass
 
         for item in merged_sources:
-            url = str(item.get("url") or item.get("link")).strip()
-            canonical_url = _canonicalize_url(url)
+            canonical_url = _canonicalize_url(str(item.get("url") or item.get("link") or "").strip())
             title_signature = " ".join(str(item.get("title") or "").casefold().split())
-            signature = (title_signature, urlparse(canonical_url).netloc.casefold())
-            if canonical_url and canonical_url in seen_urls:
-                continue
-            if signature in seen_signatures:
-                continue
-            if canonical_url:
-                seen_urls.add(canonical_url)
-            if signature != ("", ""):
-                seen_signatures.add(signature)
-            combined_results.append(item)
+            snippet_signature = " ".join(str(item.get("snippet") or item.get("description") or "").casefold().split())
+            domain_signature = urlparse(canonical_url).netloc.casefold()
+            candidate_pool.append((canonical_url, title_signature, snippet_signature, domain_signature, item))
+
+    candidate_pool.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+    combined_results: list[Mapping[str, str]] = []
+    seen_urls: set[str] = set()
+    seen_signatures: set[tuple[str, str]] = set()
+    for canonical_url, title_signature, _snippet_signature, domain_signature, item in candidate_pool:
+        signature = (title_signature, domain_signature)
+        if canonical_url and canonical_url in seen_urls:
+            continue
+        if signature in seen_signatures:
+            continue
+        if canonical_url:
+            seen_urls.add(canonical_url)
+        if signature != ("", ""):
+            seen_signatures.add(signature)
+        combined_results.append(item)
         if len(combined_results) >= 12:
             break
-    combined_results.sort(
-        key=lambda item: (
-            _canonicalize_url(str(item.get("url") or item.get("link") or "")),
-            str(item.get("title") or "").casefold(),
-            str(item.get("snippet") or item.get("description") or "").casefold(),
-        )
-    )
     return combined_results, tuple(attempted_queries)
 
 
