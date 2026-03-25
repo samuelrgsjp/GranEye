@@ -299,7 +299,7 @@ def _run_search(
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[list[Mapping[str, str]], tuple[str, ...]]:
-    candidate_pool: list[tuple[str, str, str, str, Mapping[str, str]]] = []
+    candidate_pool: list[tuple[str, str, str, str, str, str, str, Mapping[str, str]]] = []
     attempted_queries: list[str] = []
     for query_text in query_texts:
         attempted_queries.append(query_text)
@@ -328,18 +328,34 @@ def _run_search(
                     pass
 
         for item in merged_sources:
-            canonical_url = _canonicalize_url(str(item.get("url") or item.get("link") or "").strip())
-            title_signature = " ".join(str(item.get("title") or "").casefold().split())
-            snippet_signature = " ".join(str(item.get("snippet") or item.get("description") or "").casefold().split())
+            materialized = {
+                "title": str(item.get("title") or "").strip(),
+                "url": str(item.get("url") or item.get("link") or "").strip(),
+                "snippet": str(item.get("snippet") or item.get("description") or "").strip(),
+            }
+            canonical_url = _canonicalize_url(materialized["url"])
+            title_signature = " ".join(materialized["title"].casefold().split())
+            snippet_signature = " ".join(materialized["snippet"].casefold().split())
             domain_signature = urlparse(canonical_url).netloc.casefold()
-            candidate_pool.append((canonical_url, title_signature, snippet_signature, domain_signature, item))
+            candidate_pool.append(
+                (
+                    canonical_url,
+                    title_signature,
+                    snippet_signature,
+                    domain_signature,
+                    materialized["title"],
+                    materialized["url"],
+                    materialized["snippet"],
+                    materialized,
+                )
+            )
 
-    candidate_pool.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    candidate_pool.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4], item[5], item[6]))
 
     combined_results: list[Mapping[str, str]] = []
     seen_urls: set[str] = set()
     seen_signatures: set[tuple[str, str]] = set()
-    for canonical_url, title_signature, _snippet_signature, domain_signature, item in candidate_pool:
+    for canonical_url, title_signature, _snippet_signature, domain_signature, *_keys, item in candidate_pool:
         signature = (title_signature, domain_signature)
         if canonical_url and canonical_url in seen_urls:
             continue

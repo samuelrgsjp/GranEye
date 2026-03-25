@@ -52,6 +52,34 @@ def test_resolve_query_deterministic_under_source_order_permutations() -> None:
     assert first_output.no_resolution == second_output.no_resolution
 
 
+def test_resolve_query_deduplicates_with_stable_materialization_when_signatures_match() -> None:
+    html_results = [
+        {"title": "Jane Doe - Profile", "url": "https://example.com/in/jane-doe?utm_source=x", "snippet": "Engineer"},
+    ]
+    instant_results = [
+        {"title": " Jane   Doe - Profile ", "link": "https://www.example.com/in/jane-doe", "description": "Engineer"},
+    ]
+
+    output_a, ranked_a = resolve_query(
+        "Jane Doe",
+        context="Engineer Seattle",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: instant_results,
+    )
+    output_b, ranked_b = resolve_query(
+        "Jane Doe",
+        context="Engineer Seattle",
+        html_search=lambda _q: instant_results,
+        instant_search=lambda _q: html_results,
+    )
+
+    assert output_a is not None
+    assert output_b is not None
+    assert [item.result.url for item in ranked_a] == [item.result.url for item in ranked_b]
+    assert [item.result.title for item in ranked_a] == [item.result.title for item in ranked_b]
+    assert output_a.source_url == output_b.source_url
+
+
 def test_resolve_query_returns_no_output_when_all_searches_empty() -> None:
     output, ranked = resolve_query(
         "Jane Doe",
