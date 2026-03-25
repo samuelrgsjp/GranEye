@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+import json
 from html.parser import HTMLParser
 from typing import Callable, Iterable, Literal
 from urllib.parse import urlparse
@@ -13,16 +14,15 @@ from .normalization import normalize_name
 from .search import SearchResult
 
 EntityType = Literal[
-    "person_profile",
     "official_profile",
     "official_bio",
-    "academic_profile",
     "institutional_profile",
-    "media_profile",
-    "creator_profile",
-    "article",
-    "directory",
-    "aggregator",
+    "person_profile",
+    "media_article",
+    "reference_entry",
+    "directory_listing",
+    "aggregator_profile",
+    "generic_article",
     "unknown",
 ]
 NameMatchQuality = Literal["full_match", "reordered_match", "partial_match", "weak_match"]
@@ -36,7 +36,7 @@ SourceAuthorityTier = Literal[
     "junk_or_malformed",
 ]
 
-_DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages"}
+_DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages", "officialboard"}
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers", "executive", "management"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
@@ -62,6 +62,7 @@ _ACADEMIC_DOMAIN_HINTS = {".edu", ".ac.", ".edu."}
 _MEDIA_DOMAIN_HINTS = {"imdb.com", "filmaffinity.com", "tmdb.org", "variety.com", "rollingstone.com"}
 _CREATOR_PLATFORM_DOMAINS = {"youtube.com", "twitch.tv", "tiktok.com", "patreon.com", "soundcloud.com", "substack.com"}
 _AGGREGATOR_HINTS = {"fandom", "wikidata", "wikia", "allfamous", "famousbirthdays"}
+_REFERENCE_HINTS = {"wikipedia.org", "britannica.com", "wikidata.org"}
 _OFFICIAL_DOMAIN_HINTS = {
     ".gov",
     ".edu",
@@ -181,6 +182,7 @@ class ScoredCandidate:
     reasons: tuple[str, ...]
     query_validity: str = "valid"
     score_cap_applied: float | None = None
+    typing_confidence: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,9 +190,11 @@ class TopCandidateContent:
     """Lightweight extraction from the top-ranked candidate page."""
 
     page_title: str
+    og_title: str
     meta_description: str
     headings: tuple[str, ...]
     main_text: str
+    json_ld_person_names: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -291,22 +295,24 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
     personish_title = _looks_like_person_title(result.title)
 
     if is_directory_url(result.url) or any(token in domain for token in _DIRECTORY_HOST_HINTS):
-        return "directory", ("directory_pattern",)
+        return "directory_listing", ("directory_pattern",)
     if any(token in domain for token in _AGGREGATOR_HINTS):
-        return "aggregator", ("aggregator_domain_pattern",)
+        return "aggregator_profile", ("aggregator_domain_pattern",)
+    if any(domain.endswith(token) for token in _REFERENCE_HINTS):
+        return "reference_entry", ("reference_domain_pattern",)
 
     if any(segment in _ARTICLE_HINTS for segment in path_segments) or any(hint in joined_text for hint in (" breaking ", "headline", "op-ed")):
-        return "article", ("article_path_or_title_pattern",)
+        return "media_article", ("article_path_or_title_pattern",)
 
-    if any(domain.endswith(platform_domain) for platform_domain in _CREATOR_PLATFORM_DOMAINS):
-        if any(segment in path_segments for segment in {"channel", "c", "user", "creator"}) or any(
+    if any(domain.endswith(platform_domain) for platform_domain in _CREATOR_PLATFORM_DOMAINS | _NETWORK_PROFILE_DOMAINS):
+        if any(segment in path_segments for segment in {"channel", "c", "user", "creator", "in", "u", "profile"}) or any(
             segment.startswith("@") for segment in path_segments
         ):
-            return "creator_profile", ("creator_platform_path",)
-        return "media_profile", ("creator_platform_non_profile_page",)
+            return "person_profile", ("public_profile_platform_path",)
+        return "generic_article", ("platform_non_profile_page",)
 
     if any(domain.endswith(media_domain) for media_domain in _MEDIA_DOMAIN_HINTS):
-        return "media_profile", ("media_domain",)
+        return "media_article", ("media_domain",)
 
     if len(path_segments) >= 2 and path_segments[-2] in _PROFILE_SEGMENTS:
         if personish_tail and personish_title:
@@ -316,8 +322,8 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
     if any(hint in domain for hint in _ACADEMIC_DOMAIN_HINTS) or any(
         segment in path_segments for segment in {"faculty", "research", "department", "academics", "professor"}
     ):
-        if any(segment in path_segments for segment in {"faculty", "professor", "staff"}):
-            return "academic_profile", ("academic_domain_or_path",)
+        if any(segment in path_segments for segment in {"faculty", "professor", "staff", "people"}):
+            return "institutional_profile", ("academic_domain_or_path",)
         return "institutional_profile", ("institutional_academic_path",)
 
     if len(path_segments) >= 2 and path_segments[-2] in _OFFICIAL_PROFILE_SEGMENTS:
@@ -331,6 +337,8 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
         if personish_tail or personish_title:
             return "official_bio", ("company_path_with_person_signals",)
         return "institutional_profile", ("company_path_without_person_signals",)
+    if personish_tail and any(domain.endswith(suffix) for suffix in _OFFICIAL_DOMAIN_HINTS):
+        return "official_bio", ("official_domain_person_slug",)
     if any(segment in _ORG_PATH_HINTS for segment in path_segments):
         return "institutional_profile", ("organization_path_pattern",)
 
@@ -442,7 +450,7 @@ def is_noise_result(result: SearchResult) -> bool:
     noisy_phrases = ("top ", "best ", "list of", "find people", "people search")
 
     return (
-        detect_entity_type(result) in {"directory", "aggregator"}
+        detect_entity_type(result) in {"directory_listing", "aggregator_profile"}
         or any(phrase in text for phrase in noisy_phrases)
         or re.search(r"\b(aggregator|directory|listing)\b", text) is not None
     )
@@ -488,8 +496,8 @@ def detect_source_authority(result: SearchResult) -> tuple[SourceAuthorityTier, 
         return "reputable_media", 0.16, ["reputable_media_domain"]
     if any(domain.endswith(network) for network in _NETWORK_PROFILE_DOMAINS):
         return "public_structured_profile", 0.08, ["structured_public_profile"]
-    if detect_entity_type(result) in {"directory", "aggregator"}:
-        return "directory_aggregator", -0.2, ["directory_or_aggregator_source"]
+    if detect_entity_type(result) in {"directory_listing", "aggregator_profile"}:
+        return "directory_aggregator", -0.26, ["directory_or_aggregator_source"]
     if any(hint in text for hint in _LOW_AUTHORITY_BIO_HINTS):
         return "low_authority_bio_seo", -0.24, ["low_authority_biography_patterns"]
     return "public_structured_profile", 0.02, ["default_public_profile_assumption"]
@@ -517,7 +525,7 @@ def _seo_bio_penalty(result: SearchResult, authority_tier: SourceAuthorityTier) 
     if re.search(r"\b(age|net worth|family|height)\b.*\b(age|net worth|family|height)\b", text):
         penalty += 0.08
         reasons.append("repetitive_personal_info_phrasing")
-    if detect_entity_type(result) in {"article", "unknown"} and "biography" in text and result.domain.count(".") >= 1:
+    if detect_entity_type(result) in {"media_article", "generic_article", "unknown"} and "biography" in text and result.domain.count(".") >= 1:
         penalty += 0.06
         reasons.append("generic_biography_page_penalty")
     if authority_tier in {"strong_encyclopedic", "official_institutional"}:
@@ -547,16 +555,15 @@ def score_candidate(
     score = 0.0
 
     entity_weights: dict[EntityType, float] = {
-        "person_profile": 0.31,
         "official_profile": 0.4,
-        "official_bio": 0.3,
-        "academic_profile": 0.34,
+        "official_bio": 0.34,
         "institutional_profile": 0.24,
-        "media_profile": 0.22,
-        "creator_profile": 0.24,
-        "article": -0.02,
-        "directory": -0.25,
-        "aggregator": -0.2,
+        "person_profile": 0.3,
+        "media_article": 0.08,
+        "reference_entry": 0.14,
+        "directory_listing": -0.28,
+        "aggregator_profile": -0.24,
+        "generic_article": -0.08,
         "unknown": 0.0,
     }
     score += entity_weights[entity_type]
@@ -603,17 +610,17 @@ def score_candidate(
         score -= 0.3
         reasons.append("weak_context_exact_name_penalty")
 
-    if entity_type in {"person_profile", "official_profile", "academic_profile", "creator_profile"}:
+    if entity_type in {"person_profile", "official_profile", "official_bio", "institutional_profile"}:
         score += 0.08
         reasons.append("profile_structure_bonus")
 
     if context.role and entity_type in {"official_profile", "official_bio"}:
         score += 0.06
         reasons.append("role_official_alignment_bonus")
-    if context.media_platform and entity_type in {"creator_profile", "media_profile"}:
+    if context.media_platform and entity_type in {"person_profile", "media_article"}:
         score += 0.08
         reasons.append("creator_media_alignment_bonus")
-    if context.institutional_hint and entity_type in {"academic_profile", "institutional_profile"}:
+    if context.institutional_hint and entity_type in {"institutional_profile", "official_bio"}:
         score += 0.08
         reasons.append("institutional_alignment_bonus")
 
@@ -629,15 +636,15 @@ def score_candidate(
             score += 0.02
             reasons.append("network_profile_presence")
 
-    if entity_type == "article" and has_context_constraints and context_strength < 0.22:
+    if entity_type in {"media_article", "generic_article"} and has_context_constraints and context_strength < 0.22:
         score -= 0.12
         reasons.append("article_low_context_penalty")
-    if entity_type == "article" and authority_tier not in {"strong_encyclopedic", "official_institutional"}:
+    if entity_type in {"media_article", "generic_article"} and authority_tier not in {"strong_encyclopedic", "official_institutional"}:
         score -= 0.08
         reasons.append("generic_article_source_priority_penalty")
     if (
         has_context_constraints
-        and entity_type in {"official_profile", "official_bio", "institutional_profile", "academic_profile"}
+        and entity_type in {"official_profile", "official_bio", "institutional_profile"}
         and authority_tier in {"official_institutional", "strong_encyclopedic", "public_structured_profile"}
     ):
         score += 0.08
@@ -676,8 +683,20 @@ def score_candidate(
         is_noise=noisy,
         query_validity=query_validity.status,
         score_cap_applied=score_cap_applied,
+        typing_confidence=_entity_typing_confidence(entity_type, entity_rationale),
         reasons=tuple(reasons),
     )
+
+
+def _entity_typing_confidence(entity_type: EntityType, reasons: tuple[str, ...]) -> float:
+    if entity_type == "unknown":
+        return 0.2
+    strong_markers = ("official_segment", "reference_domain_pattern", "academic_domain_or_path", "public_profile_platform_path")
+    if any(any(marker in reason for marker in strong_markers) for reason in reasons):
+        return 0.9
+    if len(reasons) >= 2:
+        return 0.75
+    return 0.6
 
 
 class _HTMLSignalParser(HTMLParser):
@@ -689,8 +708,12 @@ class _HTMLSignalParser(HTMLParser):
         self._blocked_stack: list[bool] = []
         self.title = ""
         self.meta_description = ""
+        self.og_title = ""
         self.headings: list[str] = []
         self._text: list[str] = []
+        self._in_json_ld = False
+        self._json_ld_chunks: list[str] = []
+        self.json_ld_person_names: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
@@ -708,6 +731,10 @@ class _HTMLSignalParser(HTMLParser):
             self._in_heading = lowered
         if lowered == "meta" and attrs_dict.get("name", "").casefold() == "description":
             self.meta_description = attrs_dict.get("content", "").strip()
+        if lowered == "meta" and attrs_dict.get("property", "").casefold() == "og:title":
+            self.og_title = attrs_dict.get("content", "").strip()
+        if lowered == "script" and "ld+json" in attrs_dict.get("type", "").casefold():
+            self._in_json_ld = True
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
@@ -715,6 +742,12 @@ class _HTMLSignalParser(HTMLParser):
             self._blocked_stack.pop()
         if lowered in {"script", "style", "noscript"}:
             self._in_ignored = False
+        if lowered == "script" and self._in_json_ld:
+            self._in_json_ld = False
+            payload = " ".join(self._json_ld_chunks).strip()
+            self._json_ld_chunks.clear()
+            if payload:
+                self._extract_json_ld_person_names(payload)
         if lowered == "title":
             self._in_title = False
         if lowered in {"h1", "h2"}:
@@ -723,6 +756,9 @@ class _HTMLSignalParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         text = " ".join(data.split())
         if not text or self._in_ignored or any(self._blocked_stack):
+            return
+        if self._in_json_ld:
+            self._json_ld_chunks.append(data)
             return
         lowered = text.casefold()
         if any(hint in lowered for hint in _NOISE_TEXT_HINTS):
@@ -739,6 +775,26 @@ class _HTMLSignalParser(HTMLParser):
     @property
     def main_text(self) -> str:
         return " ".join(self._text)
+
+    def _extract_json_ld_person_names(self, payload: str) -> None:
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+
+        def _walk(node: object) -> None:
+            if isinstance(node, dict):
+                node_type = str(node.get("@type", "")).casefold()
+                name = node.get("name")
+                if "person" in node_type and isinstance(name, str) and name.strip():
+                    self.json_ld_person_names.append(name.strip())
+                for value in node.values():
+                    _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+
+        _walk(decoded)
 
 
 def _safe_fetch_html(url: str, timeout: int = 8) -> str:
@@ -775,25 +831,27 @@ def extract_top_candidate_content(
         html = (fetcher or _safe_fetch_html)(url)
     except HTTPError as exc:
         status = f"http_error:{exc.code}"
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), status
+        return TopCandidateContent(page_title="", og_title="", meta_description="", headings=(), main_text=""), status
     except URLError:
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "network_error"
+        return TopCandidateContent(page_title="", og_title="", meta_description="", headings=(), main_text=""), "network_error"
     except TimeoutError:
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "timeout"
+        return TopCandidateContent(page_title="", og_title="", meta_description="", headings=(), main_text=""), "timeout"
     except Exception:
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "fetch_error"
+        return TopCandidateContent(page_title="", og_title="", meta_description="", headings=(), main_text=""), "fetch_error"
 
     if not html:
-        return TopCandidateContent(page_title="", meta_description="", headings=(), main_text=""), "empty_response"
+        return TopCandidateContent(page_title="", og_title="", meta_description="", headings=(), main_text=""), "empty_response"
 
     parser = _HTMLSignalParser()
     parser.feed(html)
 
     return TopCandidateContent(
         page_title=parser.title.strip(),
+        og_title=parser.og_title.strip(),
         meta_description=parser.meta_description.strip(),
         headings=tuple(parser.headings[:8]),
         main_text=parser.main_text[:2500].strip(),
+        json_ld_person_names=tuple(parser.json_ld_person_names[:3]),
     ), "ok"
 
 
@@ -803,7 +861,7 @@ def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None
     merged = " | ".join(
         part for part in [content.page_title, content.meta_description, " ".join(content.headings), content.main_text] if part
     )
-    normalized_name = _derive_candidate_name(content)
+    normalized_name, _, _ = _derive_candidate_name(content)
 
     role_match = re.search(
         r"\b(engineer|developer|manager|director|analyst|researcher|journalist|designer|actor|actress|musician|professor|creator|streamer|author|lawyer|psychologist)\b",
@@ -844,19 +902,21 @@ def _looks_person_like_text(value: str) -> bool:
     return all(token not in _NON_PERSON_TITLE_HINTS for token in alpha_tokens[:3])
 
 
-def _derive_candidate_name(content: TopCandidateContent) -> str:
-    candidates = [
-        _clean_title_fragment(content.page_title),
-        *[_clean_title_fragment(heading) for heading in content.headings[:4]],
-        _clean_title_fragment(content.meta_description),
-    ]
-    for candidate in candidates:
+def _derive_candidate_name(content: TopCandidateContent) -> tuple[str, float, str]:
+    sources: list[tuple[str, float, str]] = []
+    if content.json_ld_person_names:
+        sources.append((content.json_ld_person_names[0], 0.98, "json_ld_person_name"))
+    if content.og_title:
+        sources.append((_clean_title_fragment(content.og_title), 0.9, "og_title"))
+    sources.extend([(_clean_title_fragment(h), 0.76, "h1_h2_heading") for h in content.headings[:2]])
+    if content.page_title:
+        sources.append((_clean_title_fragment(content.page_title), 0.68, "html_title"))
+    if content.meta_description:
+        sources.append((_clean_title_fragment(content.meta_description), 0.56, "meta_description"))
+    for candidate, quality, source in sources:
         if _looks_person_like_text(candidate):
-            return normalize_name(candidate)
-    title_head = _clean_title_fragment(content.page_title)
-    if title_head and not any(hint in title_head.casefold() for hint in _NOISE_TEXT_HINTS):
-        return normalize_name(title_head)
-    return ""
+            return normalize_name(candidate), quality, source
+    return "", 0.1, "weak_fallback"
 
 
 def rank_candidates(results: Iterable[SearchResult], query_name: str, context: ContextQuery) -> list[ScoredCandidate]:
@@ -864,7 +924,27 @@ def rank_candidates(results: Iterable[SearchResult], query_name: str, context: C
 
     query_validity = assess_query_validity(query_name)
     scored = [score_candidate(result, query_name, context, query_validity) for result in results]
-    return sorted(scored, key=lambda item: (-item.score, item.result.domain, item.result.url))
+    authority_rank = {
+        "official_institutional": 6,
+        "public_structured_profile": 5,
+        "reputable_media": 4,
+        "strong_encyclopedic": 3,
+        "low_authority_bio_seo": 2,
+        "directory_aggregator": 1,
+        "junk_or_malformed": 0,
+    }
+    return sorted(
+        scored,
+        key=lambda item: (
+            -item.score,
+            -item.context_strength,
+            -authority_rank[item.authority_tier],
+            -item.typing_confidence,
+            item.seo_penalty,
+            item.result.domain,
+            item.result.url,
+        ),
+    )
 
 
 def resolve_identity(
@@ -926,6 +1006,15 @@ def resolve_identity(
     second = ranked[1] if len(ranked) > 1 else None
     content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
     normalized_name, role, organization, inferred_location = infer_profile_signals(content)
+    canonical_name, canonical_name_quality, canonical_name_source = _derive_candidate_name(content)
+    if not canonical_name:
+        fallback_title = _clean_title_fragment(top.result.title)
+        if _looks_person_like_text(fallback_title):
+            canonical_name = normalize_name(fallback_title)
+            canonical_name_quality = 0.62
+            canonical_name_source = "search_title_fallback"
+    if canonical_name:
+        normalized_name = canonical_name
 
     same_person_probability = min(1.0, top.score * {"full_match": 1.0, "reordered_match": 0.9, "partial_match": 0.7, "weak_match": 0.4}[top.name_match])
     context_probability = min(1.0, top.context_strength + (0.15 if role or organization or inferred_location else 0.0))
@@ -954,13 +1043,13 @@ def resolve_identity(
             context.expected_domains,
         ]
     )
-    low_evidence = (
-        top.score < 0.45
+    weak_top_evidence = (
+        top.score < 0.52
         or top.name_match == "weak_match"
-        or top.entity_type in {"unknown", "article", "aggregator"}
+        or top.entity_type in {"unknown", "generic_article", "aggregator_profile", "directory_listing"}
         or top.authority_tier in {"directory_aggregator", "low_authority_bio_seo", "junk_or_malformed"}
     )
-    close_competition = second is not None and score_gap < 0.08 and second.score > 0.33
+    close_competition = second is not None and score_gap < 0.1 and second.score > 0.44
     common_name_competition = (
         not has_context_constraints
         and second is not None
@@ -971,41 +1060,72 @@ def resolve_identity(
     official_superiority = (
         top.authority_tier == "official_institutional"
         and top.name_match in {"full_match", "reordered_match"}
-        and top.context_strength >= 0.22
-        and score_gap >= 0.12
+        and top.context_strength >= 0.18
+        and score_gap >= 0.1
     )
-    ambiguity_detected = low_evidence or close_competition or common_name_competition or query_validity.status != "valid"
-    if official_superiority:
-        ambiguity_detected = False
-    ambiguity_reason = None
     evidence_strength = top.score - query_validity.penalty
     if source_diversity >= 3:
         evidence_strength += 0.05
-    if second is not None and score_gap >= 0.18:
+    if second is not None and score_gap >= 0.16:
         evidence_strength += 0.04
+    evidence_strength += min(0.08, top.context_strength * 0.15)
+    evidence_strength += 0.08 * top.typing_confidence
+    evidence_strength += 0.12 * canonical_name_quality
     if official_superiority:
         evidence_strength += 0.08
+    ambiguity_detected = close_competition or common_name_competition
+    ambiguity_reason = "multiple_plausible_candidates" if ambiguity_detected else None
+    if second is not None and top.authority_tier == "official_institutional":
+        authority_order = {
+            "official_institutional": 6,
+            "public_structured_profile": 5,
+            "reputable_media": 4,
+            "strong_encyclopedic": 3,
+            "low_authority_bio_seo": 2,
+            "directory_aggregator": 1,
+            "junk_or_malformed": 0,
+        }
+        if (
+            authority_order[top.authority_tier] - authority_order[second.authority_tier] >= 1
+            and top.context_strength >= second.context_strength
+            and top.name_match in {"full_match", "reordered_match"}
+        ):
+            ambiguity_detected = False
+            ambiguity_reason = None
+
+    strong_top_profile = (
+        top.score >= 0.62
+        and top.name_match in {"full_match", "reordered_match"}
+        and top.entity_type in {"official_profile", "official_bio", "institutional_profile", "person_profile", "reference_entry"}
+    )
+    insufficient_evidence = (evidence_strength < 0.56 and not strong_top_profile) or weak_top_evidence
     confidence_label: Literal["high", "medium", "low"] = "high"
-    if ambiguity_detected or evidence_strength < 0.48:
+    if insufficient_evidence:
         confidence_label = "low"
-        if query_validity.status != "valid":
-            ambiguity_reason = f"invalid_query:{query_validity.status}"
-        elif common_name_competition:
-            ambiguity_reason = "multiple_plausible_candidates"
-        else:
-            ambiguity_reason = "weak_evidence" if low_evidence else "multiple_plausible_candidates"
-    elif evidence_strength < 0.68 or (second is not None and score_gap < 0.16):
+    elif evidence_strength < 0.75 or (second is not None and score_gap < 0.16):
         confidence_label = "medium"
     query_token_count = len(_normalized_tokens(query_name))
     if (
         not has_context_constraints
         and query_validity.status == "valid"
         and query_token_count <= 2
-        and top.authority_tier not in {"official_institutional", "strong_encyclopedic"}
+        and second is not None
+        and top.authority_tier not in {"official_institutional"}
     ):
         confidence_label = "low"
-        ambiguity_detected = True
-        ambiguity_reason = ambiguity_reason or "multiple_plausible_candidates"
+        insufficient_evidence = True
+
+    explicit_org_alignment = bool(
+        context.organization
+        and normalize_name(context.organization) in _joined_text(top.result)
+        and top.authority_tier == "official_institutional"
+    )
+    if official_superiority and not ambiguity_detected and confidence_label == "medium" and evidence_strength >= 0.62:
+        confidence_label = "high"
+    if explicit_org_alignment and top.name_match in {"full_match", "reordered_match"} and score_gap >= 0.1:
+        confidence_label = "high"
+    if top.authority_tier == "official_institutional" and top.score >= 0.9 and top.name_match in {"full_match", "reordered_match"}:
+        confidence_label = "high"
 
     wikipedia_fallback_without_context = (
         top.result.domain.endswith("wikipedia.org")
@@ -1037,12 +1157,38 @@ def resolve_identity(
             no_resolution_reason="common_name_weak_context",
         )
 
+    if insufficient_evidence and not ambiguity_detected:
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            final_score=top.score,
+            entity_type=top.entity_type,
+            same_person_probability=same_person_probability,
+            context_match_probability=context_probability,
+            possible_role=role,
+            possible_organization=organization,
+            possible_location=inferred_location,
+            explanation=(
+                "NO_RESOLUTION: insufficient absolute evidence for unique identity; "
+                f"score={top.score:.3f}; evidence={evidence_strength:.3f}; canonical_name_quality={canonical_name_quality:.2f}"
+            ),
+            resolution_path=resolution_path,
+            fetch_status=fetch_status,
+            confidence_label="low",
+            ambiguity_detected=False,
+            ambiguity_reason=None,
+            no_resolution=True,
+            no_resolution_reason="insufficient_evidence",
+        )
+
     prefix = "AMBIGUOUS: " if ambiguity_detected else ""
     explanation = (
         f"{prefix}Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
         f"authority={top.authority_tier}; seo_penalty={top.seo_penalty:.2f}; "
         f"query_validity={query_validity.status}; score_cap={top.score_cap_applied if top.score_cap_applied is not None else 'none'}; "
         f"official_superiority_bonus={'yes' if official_superiority else 'no'}; "
+        f"typing_confidence={top.typing_confidence:.2f}; "
+        f"canonical_name_quality={canonical_name_quality:.2f}; canonical_name_source={canonical_name_source}; "
         f"name_source={'derived' if normalized_name else 'query_fallback'}; "
         f"signals: {', '.join(top.reasons[:8])}; "
         f"path={resolution_path}; fetch={fetch_status}; score_gap={score_gap:.3f}; "
@@ -1065,6 +1211,6 @@ def resolve_identity(
         confidence_label=confidence_label,
         ambiguity_detected=ambiguity_detected,
         ambiguity_reason=ambiguity_reason,
-        no_resolution=False,
-        no_resolution_reason=None,
+        no_resolution=ambiguity_detected,
+        no_resolution_reason=ambiguity_reason if ambiguity_detected else None,
     )

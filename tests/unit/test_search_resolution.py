@@ -19,10 +19,10 @@ from graneye.search import SearchResult, enrich_search_results
     ("url", "expected_type"),
     [
         ("https://www.linkedin.com/in/jane-doe-123/", "person_profile"),
-        ("https://example.com/directory/people", "directory"),
+        ("https://example.com/directory/people", "directory_listing"),
         ("https://example.com/company/acme", "official_bio"),
-        ("https://example.com/news/jane-doe-award", "article"),
-        ("https://university.example.edu/faculty/ana-ruiz-lopez", "academic_profile"),
+        ("https://example.com/news/jane-doe-award", "media_article"),
+        ("https://university.example.edu/faculty/ana-ruiz-lopez", "institutional_profile"),
         ("https://lawfirm.example.com/attorneys/francois-dupont", "official_profile"),
         ("https://corp.example.com/leadership/hans-muller", "official_profile"),
     ],
@@ -279,7 +279,7 @@ def test_low_confidence_when_only_weak_generic_results_exist() -> None:
         ),
     )
     assert output is not None
-    assert output.ambiguity_detected is True
+    assert output.no_resolution is True
     assert output.confidence_label == "low"
 
 
@@ -306,6 +306,7 @@ def test_ambiguous_common_name_sets_multiple_plausible_reason() -> None:
     assert output is not None
     assert output.ambiguity_detected is True
     assert output.ambiguity_reason == "multiple_plausible_candidates"
+    assert output.no_resolution is True
 
 
 @pytest.mark.parametrize(
@@ -386,7 +387,7 @@ def test_creator_profile_outweighs_generic_article_for_creator_context() -> None
         "Ibai Llanos",
         ContextQuery(role="streamer", media_platform="youtube", location="Spain"),
     )
-    assert ranked[0].entity_type == "creator_profile"
+    assert ranked[0].entity_type == "person_profile"
     assert ranked[0].result.url == "https://www.youtube.com/@Ibai"
 
 
@@ -409,7 +410,7 @@ def test_academic_profile_outweighs_news_when_context_is_faculty() -> None:
         "María García",
         ContextQuery(role="professor", institutional_hint="university", location="Madrid"),
     )
-    assert ranked[0].entity_type == "academic_profile"
+    assert ranked[0].entity_type == "institutional_profile"
 
 
 @pytest.mark.parametrize(
@@ -570,7 +571,7 @@ def test_official_executive_match_not_forced_low_confidence() -> None:
     )
     assert output is not None
     assert output.no_resolution is False
-    assert output.confidence_label in {"medium", "high"}
+    assert output.confidence_label == "high"
     assert "official_superiority_bonus=yes" in output.explanation
 
 
@@ -627,3 +628,82 @@ def test_invalid_queries_return_hard_no_resolution(query: str) -> None:
     assert output.source_url == ""
     assert output.normalized_candidate_name == ""
     assert "NO_RESOLUTION: invalid query" in output.explanation
+
+
+def test_strong_official_convergence_is_high_and_not_ambiguous() -> None:
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA biography of founder and CEO Jensen Huang.",
+                },
+                {
+                    "title": "Jensen Huang | LinkedIn",
+                    "url": "https://www.linkedin.com/in/jensen-huang",
+                    "snippet": "Jensen Huang at NVIDIA",
+                },
+            ]
+        ),
+        role="CEO",
+        organization="NVIDIA",
+    )
+    assert output is not None
+    assert output.source_url.startswith("https://www.nvidia.com/")
+    assert output.confidence_label == "high"
+    assert output.ambiguity_detected is False
+    assert output.no_resolution is False
+
+
+def test_official_domain_beats_aggregator_with_same_name() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - The Official Board",
+                    "url": "https://www.theofficialboard.com/biography/jensen-huang",
+                    "snippet": "Executive profile directory entry",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA leadership biography",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    assert ranked[0].result.domain == "nvidia.com"
+    assert ranked[1].authority_tier == "directory_aggregator"
+
+
+def test_linkedin_obvious_profile_not_typed_unknown() -> None:
+    result = SearchResult(
+        title="Jane Doe | LinkedIn",
+        url="https://www.linkedin.com/in/jane-doe-123",
+        domain="linkedin.com",
+        snippet="Software engineer at Acme",
+    )
+    assert detect_entity_type(result) == "person_profile"
+
+
+def test_weak_evidence_results_in_no_resolution_without_ambiguity() -> None:
+    output = resolve_identity(
+        "Random Person",
+        enrich_search_results(
+            [
+                {
+                    "title": "Random Person overview",
+                    "url": "https://example.com/about/random",
+                    "snippet": "Company overview page",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "insufficient_evidence"
+    assert output.ambiguity_detected is False
