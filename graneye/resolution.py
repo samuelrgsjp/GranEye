@@ -102,6 +102,7 @@ _LOW_AUTHORITY_BIO_HINTS = {
     "wiki",
 }
 _NON_PERSON_TITLE_HINTS = {
+    "about",
     "news",
     "report",
     "policy",
@@ -1159,7 +1160,22 @@ def _looks_person_like_text(value: str) -> bool:
     return all(token not in _NON_PERSON_TITLE_HINTS for token in alpha_tokens[:3])
 
 
-def _derive_candidate_name(content: TopCandidateContent) -> tuple[str, float, str]:
+def _looks_public_identity_alias(value: str, *, query_name: str) -> bool:
+    tokenized = [token for token in _normalized_tokens(value) if token]
+    if len(tokenized) != 1:
+        return False
+    token = tokenized[0]
+    if len(token) < 3 or token in _NON_PERSON_TITLE_HINTS:
+        return False
+    if any(hint in token for hint in _NOISE_TEXT_HINTS):
+        return False
+    if not any(char.isalpha() for char in token):
+        return False
+    query_tokens = [item for item in _normalized_tokens(query_name) if item]
+    return len(query_tokens) == 1 and query_tokens[0] == token
+
+
+def _derive_candidate_name(content: TopCandidateContent, *, query_name: str = "") -> tuple[str, float, str]:
     sources: list[tuple[str, float, str]] = []
     if content.json_ld_person_names:
         sources.append((content.json_ld_person_names[0], 0.98, "json_ld_person_name"))
@@ -1170,9 +1186,17 @@ def _derive_candidate_name(content: TopCandidateContent) -> tuple[str, float, st
         sources.append((_clean_title_fragment(content.page_title), 0.68, "html_title"))
     if content.meta_description:
         sources.append((_clean_title_fragment(content.meta_description), 0.56, "meta_description"))
+    query_token_set = set(_normalized_tokens(query_name))
     for candidate, quality, source in sources:
+        normalized_candidate = normalize_name(candidate)
+        candidate_tokens = set(_normalized_tokens(normalized_candidate))
+        overlap = bool(query_token_set and candidate_tokens and query_token_set & candidate_tokens)
+        if query_token_set and not overlap and source != "json_ld_person_name":
+            continue
         if _looks_person_like_text(candidate):
             return normalize_name(candidate), quality, source
+        if _looks_public_identity_alias(candidate, query_name=query_name):
+            return normalized_candidate, max(quality, 0.72), f"{source}_alias"
     return "", 0.1, "weak_fallback"
 
 
@@ -1267,7 +1291,7 @@ def resolve_identity(
     second = second_cluster.representative if second_cluster else None
     content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
     normalized_name, role, organization, inferred_location = infer_profile_signals(content)
-    canonical_name, canonical_name_quality, canonical_name_source = _derive_candidate_name(content)
+    canonical_name, canonical_name_quality, canonical_name_source = _derive_candidate_name(content, query_name=query_name)
     if not canonical_name:
         fallback_title = _clean_title_fragment(top.result.title)
         if _looks_person_like_text(fallback_title):
