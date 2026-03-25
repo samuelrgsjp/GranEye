@@ -116,23 +116,40 @@ def main(argv: list[str] | None = None) -> int:
 def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
     lines = [
         "=== Debug: Search pipeline ===",
+        f"Query attempts: {' | '.join(diagnostics.query_attempts) if diagnostics.query_attempts else '(none)'}",
         f"Raw results count: {diagnostics.raw_results_count}",
         f"Normalized results count: {diagnostics.normalized_results_count}",
         f"Filtered results count: {diagnostics.filtered_results_count}",
         f"Ranked candidates count: {diagnostics.ranked_candidates_count}",
-        "Per-result decisions:",
+        "Discarded candidates:",
     ]
-    for idx, decision in enumerate(diagnostics.filter_decisions, start=1):
+    discarded = [decision for decision in diagnostics.filter_decisions if not decision.accepted]
+    kept = [decision for decision in diagnostics.filter_decisions if decision.accepted]
+    for idx, decision in enumerate(discarded, start=1):
         result = decision.result
         snippet_flag = "yes" if result.snippet and result.snippet.strip() else "no"
-        status = "kept" if decision.accepted else "dropped"
         lines.append(
             (
-                f"{idx:02d}. [{status}] title={result.title or '(empty)'} | "
+                f"{idx:02d}. [dropped] title={result.title or '(empty)'} | "
                 f"url={result.url or '(empty)'} | domain={result.domain or '(empty)'} | "
                 f"snippet={snippet_flag} | reason={decision.reason}"
             )
         )
+    if not discarded:
+        lines.append("00. [dropped] (none)")
+    lines.append("Retained pre-ranking candidates:")
+    for idx, decision in enumerate(kept, start=1):
+        result = decision.result
+        snippet_flag = "yes" if result.snippet and result.snippet.strip() else "no"
+        lines.append(
+            (
+                f"{idx:02d}. [kept] title={result.title or '(empty)'} | "
+                f"url={result.url or '(empty)'} | domain={result.domain or '(empty)'} | "
+                f"snippet={snippet_flag} | reason={decision.reason}"
+            )
+        )
+    if not kept:
+        lines.append("00. [kept] (none)")
     if diagnostics.ranked_candidates:
         lines.append("Ranked candidates:")
     for idx, candidate in enumerate(diagnostics.ranked_candidates, start=1):

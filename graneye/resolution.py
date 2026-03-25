@@ -20,6 +20,8 @@ _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
 _CONTEXT_STOPWORDS = {"the", "a", "an", "at", "in", "de", "del", "la", "el", "of", "and"}
+_HIGH_SIGNAL_DOMAINS = {"wikipedia.org", "microsoft.com", "google.com", "nvidia.com", "github.com"}
+_NETWORK_PROFILE_DOMAINS = {"linkedin.com", "x.com", "twitter.com", "facebook.com", "instagram.com"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -170,6 +172,10 @@ def context_match_strength(result: SearchResult, context: ContextQuery) -> tuple
             if profession in haystack:
                 score += 0.38
                 reasons.append("profession_phrase_match")
+            profession_tokens = [token for token in _normalized_tokens(profession) if token not in _CONTEXT_STOPWORDS]
+            if len(profession_tokens) >= 2 and all(token in haystack_tokens for token in profession_tokens):
+                score += 0.12
+                reasons.append("profession_reordered_match")
             overlap_score, overlap_reasons = _context_overlap_score(profession, haystack_tokens, label="profession")
             score += 0.28 * overlap_score
             reasons.extend(overlap_reasons)
@@ -224,7 +230,7 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
 
     entity_weights: dict[EntityType, float] = {
         "person_profile": 0.35,
-        "company_page": 0.1,
+        "company_page": 0.14,
         "article": 0.05,
         "directory": -0.25,
         "unknown": 0.0,
@@ -250,17 +256,29 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
             score += snippet_bonus
     reasons.append(f"snippet_bonus:{snippet_bonus:.2f}")
 
-    score += 0.42 * context_strength
+    score += 0.5 * context_strength
     reasons.extend(context_reasons)
 
     has_context_constraints = any([context.profession, context.location, context.expected_domains])
     if has_context_constraints and name_match in {"full_match", "reordered_match"} and context_strength < 0.12:
-        score -= 0.28
+        score -= 0.3
         reasons.append("weak_context_exact_name_penalty")
 
     if entity_type == "person_profile":
         score += 0.08
         reasons.append("profile_structure_bonus")
+
+    if any(result.domain.endswith(domain) for domain in _HIGH_SIGNAL_DOMAINS):
+        score += 0.08
+        reasons.append("high_signal_domain_bonus")
+
+    if any(result.domain.endswith(domain) for domain in _NETWORK_PROFILE_DOMAINS):
+        if has_context_constraints and context_strength < 0.35:
+            score -= 0.18
+            reasons.append("network_profile_low_context_penalty")
+        else:
+            score += 0.02
+            reasons.append("network_profile_presence")
 
     if noisy:
         score -= 0.35

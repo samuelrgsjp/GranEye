@@ -161,6 +161,7 @@ def test_main_debug_prints_pipeline_counts(
         ranked_candidates_count=3,
         filter_decisions=(),
         ranked_candidates=tuple(_fake_ranked()),
+        query_attempts=("Laura Gómez Martínez Lawyer Barcelona",),
     )
 
     monkeypatch.setattr(cli, "resolve_query_with_debug", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked(), diagnostics))
@@ -170,6 +171,7 @@ def test_main_debug_prints_pipeline_counts(
 
     assert code == 0
     assert "=== Debug: Search pipeline ===" in captured.out
+    assert "Query attempts:" in captured.out
     assert "Raw results count: 5" in captured.out
     assert "Filtered results count: 3" in captured.out
     assert "Ranked candidates:" in captured.out

@@ -127,6 +127,23 @@ def test_search_duckduckgo_html_uses_lite_fallback_when_html_empty(monkeypatch) 
     assert "Founder, President and CEO of NVIDIA" in results[0]["snippet"]
 
 
+def test_search_duckduckgo_html_uses_lite_fallback_when_html_request_fails(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _fake_urlopen(request, timeout: int = 10):
+        calls.append(request.full_url)
+        if "html.duckduckgo.com" in request.full_url:
+            raise RuntimeError("temporary failure")
+        return _FakeResponse(SAMPLE_DDG_LITE_HTML.encode("utf-8"))
+
+    monkeypatch.setattr(search, "urlopen", _fake_urlopen)
+    results = search.search_duckduckgo_html("Jensen Huang NVIDIA CEO", max_results=3)
+
+    assert any("html.duckduckgo.com" in call for call in calls)
+    assert any("lite.duckduckgo.com" in call for call in calls)
+    assert results
+
+
 def test_search_duckduckgo_instant_answer_normalizes_topics(monkeypatch) -> None:
     payload = {
         "Heading": "Satya Nadella",
@@ -146,6 +163,27 @@ def test_search_duckduckgo_instant_answer_normalizes_topics(monkeypatch) -> None
     assert len(results) == 2
     assert results[0]["url"] == "https://en.wikipedia.org/wiki/Satya_Nadella"
     assert results[1]["title"] == "Satya Nadella"
+
+
+def test_search_duckduckgo_instant_answer_falls_back_to_wikipedia(monkeypatch) -> None:
+    wikipedia_payload = [
+        "Satya Nadella",
+        ["Satya Nadella"],
+        ["Indian business executive"],
+        ["https://en.wikipedia.org/wiki/Satya_Nadella"],
+    ]
+
+    def _fake_urlopen(request, timeout: int = 10):
+        assert timeout == 10
+        if "api.duckduckgo.com" in request.full_url:
+            raise RuntimeError("instant unavailable")
+        return _FakeResponse(json.dumps(wikipedia_payload).encode("utf-8"))
+
+    monkeypatch.setattr(search, "urlopen", _fake_urlopen)
+    results = search.search_duckduckgo_instant_answer("Satya Nadella", max_results=5)
+
+    assert results
+    assert results[0]["url"] == "https://en.wikipedia.org/wiki/Satya_Nadella"
 
 
 def test_parse_duckduckgo_html_results_has_fallback_link_extraction() -> None:

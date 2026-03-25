@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable, Mapping
+import re
 
 from .analyzers.base import Analyzer
 from .clustering import cluster_identities
@@ -24,6 +25,7 @@ class SearchPipelineDiagnostics:
     ranked_candidates_count: int
     filter_decisions: tuple[FilterDecision, ...]
     ranked_candidates: tuple[ScoredCandidate, ...]
+    query_attempts: tuple[str, ...] = ()
 
 
 def analyze_records(
@@ -58,39 +60,73 @@ def _context_parts(context: str | None) -> tuple[str | None, str | None]:
         profession, location = [part.strip() for part in normalized.split(",", 1)]
         return profession or None, location or None
 
+    # Allow natural forms such as "Software Engineer in London" and "CEO at Google".
+    phrase_match = re.match(
+        r"^(?P<profession>.+?)\s+(?:in|at|of|from)\s+(?P<location>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,80})$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if phrase_match:
+        profession = phrase_match.group("profession").strip()
+        location = phrase_match.group("location").strip()
+        if profession and location:
+            return profession, location
+
     return normalized, None
 
 
+def _query_variants(target_name: str, context: str | None) -> list[str]:
+    base = target_name.strip()
+    if not context:
+        return [base]
+    context_clean = context.strip()
+    if not context_clean:
+        return [base]
+    variants = [
+        f"{base} {context_clean}",
+        f"\"{base}\" {context_clean}",
+        base,
+    ]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in variants:
+        normalized = " ".join(item.split()).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ordered.append(normalized)
+    return ordered
+
+
 def _run_search(
-    query_text: str,
+    query_texts: list[str],
     *,
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
-) -> list[Mapping[str, str]]:
-    raw_results: list[Mapping[str, str]] = []
-    instant_results: list[Mapping[str, str]] = []
-    try:
-        raw_results = html_search(query_text)
-    except Exception:
-        raw_results = []
-    try:
-        instant_results = instant_search(query_text)
-    except Exception:
-        instant_results = []
+) -> tuple[list[Mapping[str, str]], tuple[str, ...]]:
+    combined_results: list[Mapping[str, str]] = []
+    seen_urls: set[str] = set()
+    attempted_queries: list[str] = []
+    for query_text in query_texts:
+        attempted_queries.append(query_text)
+        try:
+            raw_results = html_search(query_text)
+        except Exception:
+            raw_results = []
+        try:
+            instant_results = instant_search(query_text)
+        except Exception:
+            instant_results = []
 
-    combined_results = [*raw_results]
-    if instant_results:
-        seen = {
-            str(item.get("url") or item.get("link")).strip()
-            for item in raw_results
-            if str(item.get("url") or item.get("link")).strip()
-        }
-        for item in instant_results:
+        for item in [*raw_results, *instant_results]:
             url = str(item.get("url") or item.get("link")).strip()
-            if url and url not in seen:
-                combined_results.append(item)
-                seen.add(url)
-    return combined_results
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            combined_results.append(item)
+        if len(combined_results) >= 8:
+            break
+    return combined_results, tuple(attempted_queries)
 
 
 def resolve_query(
@@ -102,10 +138,11 @@ def resolve_query(
 ) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
     """End-to-end deterministic orchestration from query to ranked candidate output."""
 
-    query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
-    combined_results = _run_search(query_text, html_search=html_search, instant_search=instant_search)
-    if not combined_results and context:
-        combined_results = _run_search(target_name.strip(), html_search=html_search, instant_search=instant_search)
+    combined_results, _ = _run_search(
+        _query_variants(target_name, context),
+        html_search=html_search,
+        instant_search=instant_search,
+    )
 
     normalized_results = normalize_search_results(combined_results)
     search_results, _ = filter_search_results(normalized_results)
@@ -136,10 +173,11 @@ def resolve_query_with_debug(
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[ResolutionOutput | None, list[ScoredCandidate], SearchPipelineDiagnostics]:
-    query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
-    combined_results = _run_search(query_text, html_search=html_search, instant_search=instant_search)
-    if not combined_results and context:
-        combined_results = _run_search(target_name.strip(), html_search=html_search, instant_search=instant_search)
+    combined_results, query_attempts = _run_search(
+        _query_variants(target_name, context),
+        html_search=html_search,
+        instant_search=instant_search,
+    )
 
     normalized_results = normalize_search_results(combined_results)
     search_results, filter_decisions = filter_search_results(normalized_results)
@@ -167,5 +205,6 @@ def resolve_query_with_debug(
         ranked_candidates_count=len(ranked),
         filter_decisions=tuple(filter_decisions),
         ranked_candidates=tuple(ranked),
+        query_attempts=query_attempts,
     )
     return resolved, ranked, diagnostics
