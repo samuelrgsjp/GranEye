@@ -19,6 +19,7 @@ _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "w
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
+_CONTEXT_STOPWORDS = {"the", "a", "an", "at", "in", "de", "del", "la", "el", "of", "and"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -78,6 +79,26 @@ def _normalized_tokens(value: str) -> list[str]:
 
 def _joined_text(result: SearchResult) -> str:
     return " ".join(part for part in [result.title, result.snippet or "", result.url] if part).casefold()
+
+
+def _domain_tokens(domain: str) -> set[str]:
+    raw_parts = re.split(r"[.\-_/]+", domain.casefold())
+    return {part for part in raw_parts if part and part not in {"www", "com", "org", "net"}}
+
+
+def _context_overlap_score(context_value: str, haystack_tokens: set[str], *, label: str) -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    tokens = [token for token in _normalized_tokens(context_value) if token not in _CONTEXT_STOPWORDS]
+    if not tokens:
+        return 0.0, reasons
+    token_set = set(tokens)
+    overlap = token_set & haystack_tokens
+    coverage = len(overlap) / len(token_set)
+    if coverage > 0:
+        reasons.append(f"{label}_token_overlap:{coverage:.2f}")
+    if coverage >= 0.99:
+        reasons.append(f"{label}_full_coverage")
+    return coverage, reasons
 
 
 def detect_entity_type(result: SearchResult) -> EntityType:
@@ -140,22 +161,39 @@ def context_match_strength(result: SearchResult, context: ContextQuery) -> tuple
     reasons: list[str] = []
     score = 0.0
     haystack = _joined_text(result)
+    haystack_tokens = set(_normalized_tokens(haystack))
+    haystack_tokens.update(_domain_tokens(result.domain))
 
     if context.profession:
         profession = normalize_name(context.profession)
-        if profession and profession in haystack:
-            score += 0.45
-            reasons.append("profession_match")
+        if profession:
+            if profession in haystack:
+                score += 0.38
+                reasons.append("profession_phrase_match")
+            overlap_score, overlap_reasons = _context_overlap_score(profession, haystack_tokens, label="profession")
+            score += 0.28 * overlap_score
+            reasons.extend(overlap_reasons)
 
     if context.location:
         location = normalize_name(context.location)
-        if location and location in haystack:
-            score += 0.35
-            reasons.append("location_match")
+        if location:
+            if location in haystack:
+                score += 0.3
+                reasons.append("location_phrase_match")
+            overlap_score, overlap_reasons = _context_overlap_score(location, haystack_tokens, label="location")
+            score += 0.25 * overlap_score
+            reasons.extend(overlap_reasons)
 
     if context.expected_domains and any(result.domain.endswith(domain) for domain in context.expected_domains):
         score += 0.2
         reasons.append("domain_relevance")
+
+    if context.profession and context.location:
+        if all(token in haystack_tokens for token in _normalized_tokens(context.profession)[:2]) and any(
+            token in haystack_tokens for token in _normalized_tokens(context.location)
+        ):
+            score += 0.1
+            reasons.append("combined_context_alignment")
 
     return min(score, 1.0), tuple(reasons)
 
@@ -195,10 +233,10 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     reasons.append(f"entity:{entity_type}")
 
     name_weights: dict[NameMatchQuality, float] = {
-        "full_match": 0.4,
-        "reordered_match": 0.3,
-        "partial_match": 0.15,
-        "weak_match": 0.02,
+        "full_match": 0.34,
+        "reordered_match": 0.26,
+        "partial_match": 0.14,
+        "weak_match": 0.03,
     }
     score += name_weights[name_match]
     reasons.append(f"name:{name_match}")
@@ -212,12 +250,12 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
             score += snippet_bonus
     reasons.append(f"snippet_bonus:{snippet_bonus:.2f}")
 
-    score += 0.3 * context_strength
+    score += 0.42 * context_strength
     reasons.extend(context_reasons)
 
     has_context_constraints = any([context.profession, context.location, context.expected_domains])
     if has_context_constraints and name_match in {"full_match", "reordered_match"} and context_strength < 0.12:
-        score -= 0.22
+        score -= 0.28
         reasons.append("weak_context_exact_name_penalty")
 
     if entity_type == "person_profile":

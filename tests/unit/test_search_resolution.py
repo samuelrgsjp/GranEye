@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 
 from graneye.resolution import (
     ContextQuery,
+    context_match_strength,
     detect_entity_type,
     detect_name_match_quality,
     rank_candidates,
@@ -169,6 +170,40 @@ def test_exact_name_weak_context_does_not_outrank_context_aligned_candidate() ->
     )
     assert ranked[0].result.url == "https://uk-dev.example.org/in/john-smith-london"
     assert any("weak_context_exact_name_penalty" in reason for reason in ranked[1].reasons)
+
+
+def test_context_match_strength_works_with_title_only_reordered_context() -> None:
+    result = SearchResult(
+        title="Satya Nadella - Chairman and CEO at Microsoft",
+        url="https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+        domain="microsoft.com",
+        snippet=None,
+    )
+    score, reasons = context_match_strength(result, ContextQuery(profession="Microsoft CEO"))
+    assert score > 0.25
+    assert any(reason.startswith("profession_token_overlap") for reason in reasons)
+
+
+def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez",
+                    "url": "https://profiles.example.com/in/carlos-perez",
+                    "snippet": "Professional profile",
+                },
+                {
+                    "title": "Carlos Pérez - Cybersecurity Specialist",
+                    "url": "https://security-spain.example.org/in/carlos-perez",
+                    "snippet": "Cybersecurity consultant in Spain",
+                },
+            ]
+        ),
+        "Carlos Pérez",
+        ContextQuery(profession="Cybersecurity", location="Spain"),
+    )
+    assert ranked[0].result.url == "https://security-spain.example.org/in/carlos-perez"
 
 
 @pytest.mark.parametrize(

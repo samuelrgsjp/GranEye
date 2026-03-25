@@ -160,6 +160,7 @@ def test_main_debug_prints_pipeline_counts(
         filtered_results_count=3,
         ranked_candidates_count=3,
         filter_decisions=(),
+        ranked_candidates=tuple(_fake_ranked()),
     )
 
     monkeypatch.setattr(cli, "resolve_query_with_debug", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked(), diagnostics))
@@ -171,3 +172,4 @@ def test_main_debug_prints_pipeline_counts(
     assert "=== Debug: Search pipeline ===" in captured.out
     assert "Raw results count: 5" in captured.out
     assert "Filtered results count: 3" in captured.out
+    assert "Ranked candidates:" in captured.out

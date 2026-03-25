@@ -133,6 +133,20 @@ def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
                 f"snippet={snippet_flag} | reason={decision.reason}"
             )
         )
+    if diagnostics.ranked_candidates:
+        lines.append("Ranked candidates:")
+    for idx, candidate in enumerate(diagnostics.ranked_candidates, start=1):
+        result = candidate.result
+        snippet_flag = "yes" if result.snippet and result.snippet.strip() else "no"
+        lines.append(
+            (
+                f"{idx:02d}. keep reason=ranked | title={result.title or '(empty)'} | "
+                f"url={result.url} | domain={result.domain or '(empty)'} | "
+                f"snippet={snippet_flag} | entity={candidate.entity_type} | "
+                f"name_match={candidate.name_match} | context={candidate.context_strength:.3f} | "
+                f"final={candidate.score:.3f} | signals={','.join(candidate.reasons[:8])}"
+            )
+        )
     return "\n".join(lines)
 
 

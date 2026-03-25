@@ -23,6 +23,7 @@ class SearchPipelineDiagnostics:
     filtered_results_count: int
     ranked_candidates_count: int
     filter_decisions: tuple[FilterDecision, ...]
+    ranked_candidates: tuple[ScoredCandidate, ...]
 
 
 def analyze_records(
@@ -60,23 +61,18 @@ def _context_parts(context: str | None) -> tuple[str | None, str | None]:
     return normalized, None
 
 
-def resolve_query(
-    target_name: str,
+def _run_search(
+    query_text: str,
     *,
-    context: str | None,
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
-) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
-    """End-to-end deterministic orchestration from query to ranked candidate output."""
-
-    query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
+) -> list[Mapping[str, str]]:
     raw_results: list[Mapping[str, str]] = []
     instant_results: list[Mapping[str, str]] = []
     try:
         raw_results = html_search(query_text)
     except Exception:
         raw_results = []
-
     try:
         instant_results = instant_search(query_text)
     except Exception:
@@ -94,6 +90,22 @@ def resolve_query(
             if url and url not in seen:
                 combined_results.append(item)
                 seen.add(url)
+    return combined_results
+
+
+def resolve_query(
+    target_name: str,
+    *,
+    context: str | None,
+    html_search: Callable[[str], list[Mapping[str, str]]],
+    instant_search: Callable[[str], list[Mapping[str, str]]],
+) -> tuple[ResolutionOutput | None, list[ScoredCandidate]]:
+    """End-to-end deterministic orchestration from query to ranked candidate output."""
+
+    query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
+    combined_results = _run_search(query_text, html_search=html_search, instant_search=instant_search)
+    if not combined_results and context:
+        combined_results = _run_search(target_name.strip(), html_search=html_search, instant_search=instant_search)
 
     normalized_results = normalize_search_results(combined_results)
     search_results, _ = filter_search_results(normalized_results)
@@ -125,30 +137,9 @@ def resolve_query_with_debug(
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> tuple[ResolutionOutput | None, list[ScoredCandidate], SearchPipelineDiagnostics]:
     query_text = " ".join(part for part in [target_name.strip(), (context or "").strip()] if part)
-    raw_results: list[Mapping[str, str]] = []
-    instant_results: list[Mapping[str, str]] = []
-    try:
-        raw_results = html_search(query_text)
-    except Exception:
-        raw_results = []
-
-    try:
-        instant_results = instant_search(query_text)
-    except Exception:
-        instant_results = []
-
-    combined_results = [*raw_results]
-    if instant_results:
-        seen = {
-            str(item.get("url") or item.get("link")).strip()
-            for item in raw_results
-            if str(item.get("url") or item.get("link")).strip()
-        }
-        for item in instant_results:
-            url = str(item.get("url") or item.get("link")).strip()
-            if url and url not in seen:
-                combined_results.append(item)
-                seen.add(url)
+    combined_results = _run_search(query_text, html_search=html_search, instant_search=instant_search)
+    if not combined_results and context:
+        combined_results = _run_search(target_name.strip(), html_search=html_search, instant_search=instant_search)
 
     normalized_results = normalize_search_results(combined_results)
     search_results, filter_decisions = filter_search_results(normalized_results)
@@ -175,5 +166,6 @@ def resolve_query_with_debug(
         filtered_results_count=len(search_results),
         ranked_candidates_count=len(ranked),
         filter_decisions=tuple(filter_decisions),
+        ranked_candidates=tuple(ranked),
     )
     return resolved, ranked, diagnostics
