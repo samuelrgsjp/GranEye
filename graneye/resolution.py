@@ -285,6 +285,79 @@ def _domain_tokens(domain: str) -> set[str]:
     return {part for part in raw_parts if part and part not in {"www", "com", "org", "net"}}
 
 
+def _path_tokens(result: SearchResult) -> set[str]:
+    parsed = urlparse(result.url)
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    tokens: set[str] = set()
+    for segment in segments:
+        tokens.update(part for part in re.split(r"[-_]+", segment) if part)
+    return tokens
+
+
+def _token_coverage(hint: str | None, haystack: set[str]) -> float:
+    if not hint:
+        return 0.0
+    tokens = [token for token in _normalized_tokens(hint) if token and token not in _CONTEXT_STOPWORDS]
+    if not tokens:
+        return 0.0
+    return len(set(tokens) & haystack) / len(set(tokens))
+
+
+def _is_likely_common_name(query_name: str) -> bool:
+    tokens = [token for token in _normalized_tokens(query_name) if token]
+    return len(tokens) >= 2 and all(token in _COMMON_NAME_TOKENS for token in tokens[:2])
+
+
+def _official_identity_signal(candidate: ScoredCandidate, query_name: str, context: ContextQuery) -> tuple[float, tuple[str, ...]]:
+    joined = _joined_text(candidate.result)
+    domain_tokens = _domain_tokens(candidate.result.domain)
+    path_tokens = _path_tokens(candidate.result)
+    combined_tokens = domain_tokens | path_tokens | set(_normalized_tokens(joined))
+    query_tokens = set(_normalized_tokens(query_name))
+    parsed = urlparse(candidate.result.url)
+    path_segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    tail_segment = path_segments[-1] if path_segments else ""
+    reasons: list[str] = []
+    signal = 0.0
+
+    org_coverage_text = _token_coverage(context.organization, set(_normalized_tokens(joined)))
+    org_coverage_domain_path = _token_coverage(context.organization, domain_tokens | path_tokens)
+    if org_coverage_text >= 0.6:
+        signal += 0.36
+        reasons.append("org_text_overlap_strong")
+    elif org_coverage_text > 0:
+        signal += 0.2 * org_coverage_text
+        reasons.append("org_text_overlap_partial")
+    if org_coverage_domain_path >= 0.6:
+        signal += 0.3
+        reasons.append("org_domain_path_overlap_strong")
+    elif org_coverage_domain_path > 0:
+        signal += 0.18 * org_coverage_domain_path
+        reasons.append("org_domain_path_overlap_partial")
+
+    role_coverage = _token_coverage(context.role, combined_tokens)
+    if role_coverage >= 0.5:
+        signal += 0.2
+        reasons.append("role_overlap")
+
+    if _path_has_identity_hints(path_segments):
+        signal += 0.12
+        reasons.append("identity_path_hint")
+
+    if query_tokens and tail_segment:
+        tail_tokens = {token for token in re.split(r"[-_]+", tail_segment) if token}
+        overlap = len(tail_tokens & query_tokens) / len(query_tokens)
+        if overlap >= 0.5:
+            signal += 0.16
+            reasons.append("person_slug_overlap")
+
+    if candidate.entity_type in {"official_profile", "official_bio"}:
+        signal += 0.08
+        reasons.append("official_person_entity")
+
+    return min(1.0, signal), tuple(reasons)
+
+
 def _context_overlap_score(context_value: str, haystack_tokens: set[str], *, label: str) -> tuple[float, list[str]]:
     reasons: list[str] = []
     tokens = [token for token in _normalized_tokens(context_value) if token not in _CONTEXT_STOPWORDS]
@@ -1257,23 +1330,31 @@ def _same_person_support(candidate: ScoredCandidate, query_name: str, context: C
         return False
     if candidate.authority_tier != "official_institutional":
         return False
-    if context.organization:
-        org_norm = normalize_name(context.organization)
-        if org_norm and org_norm not in _joined_text(candidate.result):
-            return False
-    return candidate.context_strength >= 0.2
+    identity_signal, _ = _official_identity_signal(candidate, query_name, context)
+    if _is_likely_common_name(query_name):
+        return candidate.context_strength >= 0.35 and identity_signal >= 0.6
+    if context.organization or context.role:
+        return candidate.context_strength >= 0.16 and identity_signal >= 0.42
+    return candidate.context_strength >= 0.2 and identity_signal >= 0.28
 
 
-def _candidate_adjustment(candidate: ScoredCandidate, *, strong_official_exists: bool, context: ContextQuery) -> float:
+def _candidate_adjustment(
+    candidate: ScoredCandidate,
+    *,
+    strong_official_exists: bool,
+    context: ContextQuery,
+    query_name: str,
+) -> float:
     adjustment = 0.0
     if strong_official_exists and candidate.entity_type in {"media_article", "generic_article"}:
         adjustment -= 0.16
     if strong_official_exists and candidate.result.domain.endswith("wikipedia.org"):
         adjustment -= 0.08
     if candidate.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES and candidate.name_match in {"full_match", "reordered_match"}:
-        if context.organization and normalize_name(context.organization) in _joined_text(candidate.result):
+        identity_signal, _ = _official_identity_signal(candidate, query_name, context)
+        if identity_signal >= 0.55:
             adjustment += 0.08
-        if context.role and normalize_name(context.role) in _joined_text(candidate.result):
+        if context.role and identity_signal >= 0.45:
             adjustment += 0.04
     return adjustment
 
@@ -1287,7 +1368,7 @@ def rank_candidates(results: Iterable[SearchResult], query_name: str, context: C
     if strong_official_exists:
         adjusted: list[ScoredCandidate] = []
         for item in scored:
-            delta = _candidate_adjustment(item, strong_official_exists=True, context=context)
+            delta = _candidate_adjustment(item, strong_official_exists=True, context=context, query_name=query_name)
             if delta == 0:
                 adjusted.append(item)
                 continue
