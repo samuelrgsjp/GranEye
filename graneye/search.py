@@ -4,11 +4,13 @@ import json
 import re
 from dataclasses import dataclass
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any, Mapping
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
 _DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
+_DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
 _DDG_INSTANT_ENDPOINT = "https://api.duckduckgo.com/"
 _DDG_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -24,7 +26,11 @@ _RESULT_LINK_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _RESULT_SNIPPET_PATTERN = re.compile(
-    r"<(a|div|span)\b[^>]*\bclass=(['\"])[^'\"]*\b(result__snippet|snippet)\b[^'\"]*\2[^>]*>(.*?)</\1>",
+    r"<(a|div|span|td)\b[^>]*\bclass=(['\"])[^'\"]*\b(result__snippet|result-snippet|snippet)\b[^'\"]*\2[^>]*>(.*?)</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_LITE_SNIPPET_ROW_PATTERN = re.compile(
+    r"<tr\b[^>]*\bclass=(['\"])[^'\"]*\bresult-snippet\b[^'\"]*\1[^>]*>(.*?)</tr>",
     re.IGNORECASE | re.DOTALL,
 )
 _FALLBACK_RESULT_LINK_PATTERN = re.compile(
@@ -50,6 +56,111 @@ _DDG_INTERNAL_PATH_HINTS = (
     "/traffic",
 )
 _PLACEHOLDER_TITLES = {"here", "cached", "feedback", "more results"}
+
+
+class _DuckDuckGoResultParser(HTMLParser):
+    """Stateful parser for DuckDuckGo HTML and lite variants."""
+
+    def __init__(self, *, max_results: int) -> None:
+        super().__init__()
+        self._max_results = max_results
+        self._results: list[dict[str, str]] = []
+        self._seen_urls: set[str] = set()
+        self._stack: list[tuple[str, str]] = []
+        self._active_result_depth: int | None = None
+        self._current_title_parts: list[str] = []
+        self._current_url: str = ""
+        self._current_snippet_parts: list[str] = []
+        self._capturing_title = False
+        self._capturing_snippet = False
+        self._snippet_depth: int | None = None
+
+    @property
+    def results(self) -> list[dict[str, str]]:
+        return self._results
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = {key.casefold(): (value or "") for key, value in attrs}
+        class_attr = attrs_dict.get("class", "")
+        self._stack.append((tag.casefold(), class_attr.casefold()))
+        depth = len(self._stack)
+        if self._active_result_depth is None and self._is_result_container(tag, class_attr):
+            self._active_result_depth = depth
+            self._current_title_parts = []
+            self._current_url = ""
+            self._current_snippet_parts = []
+
+        if self._active_result_depth is None:
+            return
+
+        href = attrs_dict.get("href", "").strip()
+        if tag.casefold() == "a" and href and self._is_result_link(class_attr):
+            self._capturing_title = True
+            self._current_url = _resolve_ddg_redirect(unescape(href))
+
+        if self._is_snippet_container(class_attr):
+            self._capturing_snippet = True
+            self._snippet_depth = depth
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.casefold()
+        depth = len(self._stack)
+        if self._capturing_title and lowered == "a":
+            self._capturing_title = False
+
+        if self._capturing_snippet and self._snippet_depth is not None and depth <= self._snippet_depth:
+            self._capturing_snippet = False
+            self._snippet_depth = None
+
+        if self._active_result_depth is not None and depth == self._active_result_depth:
+            self._finalize_current_result()
+            self._active_result_depth = None
+            self._current_title_parts = []
+            self._current_url = ""
+            self._current_snippet_parts = []
+
+        if self._stack:
+            self._stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if self._active_result_depth is None:
+            return
+        text = _clean_html_text(data)
+        if not text:
+            return
+        if self._capturing_title:
+            self._current_title_parts.append(text)
+        elif self._capturing_snippet:
+            self._current_snippet_parts.append(text)
+
+    def _is_result_container(self, tag: str, class_attr: str) -> bool:
+        lowered = class_attr.casefold()
+        if "result" not in lowered:
+            return False
+        return tag.casefold() in {"article", "div", "li", "tr"}
+
+    def _is_result_link(self, class_attr: str) -> bool:
+        lowered = class_attr.casefold()
+        return any(token in lowered for token in ("result__a", "result-link", "result-title"))
+
+    def _is_snippet_container(self, class_attr: str) -> bool:
+        lowered = class_attr.casefold()
+        return any(token in lowered for token in ("result__snippet", "snippet", "result-snippet"))
+
+    def _finalize_current_result(self) -> None:
+        if len(self._results) >= self._max_results:
+            return
+        title = _WS_PATTERN.sub(" ", " ".join(self._current_title_parts)).strip()
+        snippet = _WS_PATTERN.sub(" ", " ".join(self._current_snippet_parts)).strip()
+        url = self._current_url.strip()
+        if not url or url in self._seen_urls:
+            return
+        if not _is_likely_web_result(url):
+            return
+        if not _is_non_trivial_title(title):
+            return
+        self._seen_urls.add(url)
+        self._results.append({"title": title, "url": url, "snippet": snippet})
 
 
 @dataclass(slots=True, frozen=True)
@@ -170,34 +281,30 @@ def evaluate_candidate_result(title: str, url: str, snippet: str = "") -> Filter
 def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[dict[str, str]]:
     """Extract DuckDuckGo HTML results in a resilient way without relying on parser state."""
 
-    results: list[dict[str, str]] = []
-
-    seen_urls: set[str] = set()
-
-    for block_match in _RESULT_BLOCK_PATTERN.finditer(html):
-        block = block_match.group(3)
-        link_match = _RESULT_LINK_PATTERN.search(block)
-        if not link_match:
+    parser = _DuckDuckGoResultParser(max_results=max_results)
+    parser.feed(html)
+    results = list(parser.results)
+    fallback_snippets: dict[str, str] = {}
+    for link_match in _FALLBACK_RESULT_LINK_PATTERN.finditer(html):
+        raw_url = unescape(link_match.group(2).strip())
+        resolved_url = _resolve_ddg_redirect(raw_url)
+        if not resolved_url:
             continue
+        trailing_chunk = html[link_match.end() : link_match.end() + 1200]
+        snippet_match = _RESULT_SNIPPET_PATTERN.search(trailing_chunk)
+        snippet_value = _clean_html_text(snippet_match.group(4)) if snippet_match else ""
+        if not snippet_value:
+            snippet_row_match = _LITE_SNIPPET_ROW_PATTERN.search(trailing_chunk)
+            if snippet_row_match:
+                snippet_value = _clean_html_text(snippet_row_match.group(2))
+        if snippet_value:
+            fallback_snippets.setdefault(resolved_url, snippet_value)
 
-        raw_url = unescape(link_match.group(3).strip())
-        url = _resolve_ddg_redirect(raw_url)
-        title = _clean_html_text(link_match.group(4))
-
-        snippet_match = _RESULT_SNIPPET_PATTERN.search(block)
-        snippet = _clean_html_text(snippet_match.group(4)) if snippet_match else ""
-
-        if not url or url in seen_urls:
+    for item in results:
+        if item.get("snippet"):
             continue
-        if not _is_likely_web_result(url):
-            continue
-        if not _is_non_trivial_title(title):
-            continue
-
-        seen_urls.add(url)
-        results.append({"title": title, "url": url, "snippet": snippet})
-        if len(results) >= max_results:
-            break
+        item["snippet"] = fallback_snippets.get(item.get("url", ""), "")
+    seen_urls = {item["url"] for item in results}
 
     if len(results) >= max_results:
         return results
@@ -207,6 +314,9 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
         raw_url = unescape(link_match.group(2).strip())
         url = _resolve_ddg_redirect(raw_url)
         title = _clean_html_text(link_match.group(3))
+        trailing_chunk = html[link_match.end() : link_match.end() + 700]
+        snippet_match = _RESULT_SNIPPET_PATTERN.search(trailing_chunk)
+        snippet = _clean_html_text(snippet_match.group(4)) if snippet_match else ""
         if not title or not url or url in seen_urls:
             continue
 
@@ -216,7 +326,7 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
             continue
 
         seen_urls.add(url)
-        results.append({"title": title, "url": url, "snippet": ""})
+        results.append({"title": title, "url": url, "snippet": snippet})
         if len(results) >= max_results:
             break
 
@@ -241,6 +351,28 @@ def search_duckduckgo_html(query: str, *, max_results: int = 10) -> list[dict[st
     with urlopen(request, timeout=10) as response:
         html = response.read(600_000).decode("utf-8", errors="ignore")
 
+    results = parse_duckduckgo_html_results(html, max_results=max_results)
+    if results:
+        return results
+    return search_duckduckgo_lite(query, max_results=max_results)
+
+
+def search_duckduckgo_lite(query: str, *, max_results: int = 10) -> list[dict[str, str]]:
+    """Lite endpoint fallback used when the main HTML endpoint returns no parseable results."""
+
+    encoded = quote_plus(query)
+    url = f"{_DDG_LITE_ENDPOINT}?q={encoded}"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": _DDG_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://duckduckgo.com/",
+        },
+    )
+    with urlopen(request, timeout=10) as response:
+        html = response.read(500_000).decode("utf-8", errors="ignore")
     return parse_duckduckgo_html_results(html, max_results=max_results)
 
 

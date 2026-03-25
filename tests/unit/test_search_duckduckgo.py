@@ -36,6 +36,19 @@ SAMPLE_DDG_HTML_FALLBACK = """
 </html>
 """
 
+SAMPLE_DDG_LITE_HTML = """
+<html>
+  <body>
+    <table>
+      <tr class="result">
+        <td><a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.nvidia.com%2Fen-us%2Fabout-nvidia%2Fleadership%2F">Jensen Huang - NVIDIA Leadership</a></td>
+      </tr>
+      <tr class="result-snippet"><td>Founder, President and CEO of NVIDIA.</td></tr>
+    </table>
+  </body>
+</html>
+"""
+
 SAMPLE_DDG_HTML_INTERNAL = """
 <html>
   <body>
@@ -92,6 +105,26 @@ def test_search_duckduckgo_html_uses_html_endpoint_and_headers(monkeypatch) -> N
     assert captured["url"] == f"https://html.duckduckgo.com/html/?q={quote_plus('Satya Nadella Microsoft CEO')}"
     assert "Mozilla/5.0" in captured["ua"]
     assert "text/html" in captured["accept"]
+
+
+def test_search_duckduckgo_html_uses_lite_fallback_when_html_empty(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _fake_urlopen(request, timeout: int = 10):
+        assert timeout == 10
+        calls.append(request.full_url)
+        if "html.duckduckgo.com" in request.full_url:
+            return _FakeResponse("<html><body>no parsed results</body></html>".encode("utf-8"))
+        return _FakeResponse(SAMPLE_DDG_LITE_HTML.encode("utf-8"))
+
+    monkeypatch.setattr(search, "urlopen", _fake_urlopen)
+    results = search.search_duckduckgo_html("Jensen Huang NVIDIA CEO", max_results=3)
+
+    assert any("html.duckduckgo.com" in call for call in calls)
+    assert any("lite.duckduckgo.com" in call for call in calls)
+    assert results
+    assert results[0]["url"] == "https://www.nvidia.com/en-us/about-nvidia/leadership/"
+    assert "Founder, President and CEO of NVIDIA" in results[0]["snippet"]
 
 
 def test_search_duckduckgo_instant_answer_normalizes_topics(monkeypatch) -> None:
