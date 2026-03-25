@@ -808,6 +808,13 @@ def score_candidate(
     ):
         score += 0.08
         reasons.append("source_priority_boost:structured_or_official")
+    if (
+        has_context_constraints
+        and entity_type in {"person_profile", "official_profile", "official_bio", "institutional_profile"}
+        and context_strength >= 0.3
+    ):
+        score += 0.1
+        reasons.append("context_aligned_structured_profile_bonus")
 
     if noisy:
         score -= 0.35
@@ -819,6 +826,9 @@ def score_candidate(
     if result.domain.endswith("wikipedia.org") and context_strength < 0.15:
         score -= 0.08
         reasons.append("wikipedia_weak_context_penalty")
+    if result.domain.endswith("wikipedia.org") and context.organization and context_strength < 0.3:
+        score -= 0.12
+        reasons.append("wikipedia_context_mismatch_penalty")
     score_cap_applied: float | None = None
     query_score_caps = {
         "too_short": 0.42,

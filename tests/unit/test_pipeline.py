@@ -92,25 +92,25 @@ def test_resolve_query_returns_no_output_when_all_searches_empty() -> None:
     assert ranked == []
 
 
-def test_resolve_query_retries_with_name_only_when_context_query_is_empty() -> None:
+def test_resolve_query_retries_with_name_only_when_context_lacks_org_or_location() -> None:
     seen_queries: list[str] = []
 
     def _html_search(query: str) -> list[dict[str, str]]:
         seen_queries.append(query)
-        if "Microsoft CEO" in query:
+        if "CEO" in query and query != "Satya Nadella":
             return []
         return [{"title": "Satya Nadella - Microsoft", "url": "https://example.com/satya", "snippet": "CEO at Microsoft"}]
 
     output, ranked = resolve_query(
         "Satya Nadella",
-        context="Microsoft CEO",
+        context="CEO",
         html_search=_html_search,
         instant_search=lambda _q: [],
     )
     assert output is not None
     assert ranked
-    assert seen_queries[0] == "Satya Nadella Microsoft CEO"
-    assert "\"Satya Nadella\" Microsoft CEO" in seen_queries
+    assert seen_queries[0] == "Satya Nadella CEO"
+    assert "\"Satya Nadella\" CEO" in seen_queries
     assert "Satya Nadella" in seen_queries
 
 
@@ -237,11 +237,60 @@ def test_parse_context_disambiguates_role_org_location_activity() -> None:
     assert messi.location == "argentina"
 
 
+def test_parse_context_supports_private_person_role_location_and_org_patterns() -> None:
+    system_admin = _parse_context("System Administrator Cantabria")
+    assert system_admin.role == "system administrator"
+    assert system_admin.location == "Cantabria"
+
+    admin_es = _parse_context("Administrador de sistemas España")
+    assert admin_es.role == "administrador de sistemas"
+    assert admin_es.location == "España"
+
+    netkia = _parse_context("Netkia Cantabria")
+    assert netkia.organization == "Netkia"
+    assert netkia.location == "Cantabria"
+    assert netkia.domain_activity is None
+
+    reverse = _parse_context("Spain System Administrator")
+    assert reverse.role == "system administrator"
+    assert reverse.location == "Spain"
+
+
 def test_query_variants_expand_beyond_professional_context() -> None:
     variants = _query_variants("Penélope Cruz", "Actress")
-    assert "Penélope Cruz Actress official" in variants
-    assert "Penélope Cruz Actress wikipedia" in variants
-    assert "\"Penélope Cruz\" Actress official bio" in variants
+    assert "Penélope Cruz Actress linkedin" in variants
+    assert "Penélope Cruz Actress team" in variants
+    assert "Penélope Cruz Actress profile" in variants
+    assert "Penélope Cruz linkedin" in variants
+
+
+def test_query_variants_for_private_context_prioritize_company_and_profile_patterns() -> None:
+    variants = _query_variants("Samuel Ruiz García", "Netkia Cantabria")
+    assert "\"Samuel Ruiz García\" \"Netkia\"" in variants
+    assert "\"Samuel Ruiz García\" \"Netkia\" \"Cantabria\"" in variants
+    assert "Samuel Ruiz García Netkia linkedin" in variants
+    assert "Samuel Ruiz García Netkia staff" in variants
+    assert "Samuel Ruiz García Netkia team" in variants
+    assert "Samuel Ruiz García Netkia Cantabria wikipedia" not in variants
+
+
+def test_resolve_query_context_with_org_location_does_not_add_name_only_fallback() -> None:
+    seen_queries: list[str] = []
+
+    def _html_search(query: str) -> list[dict[str, str]]:
+        seen_queries.append(query)
+        return []
+
+    output, ranked = resolve_query(
+        "Samuel Ruiz García",
+        context="Netkia Cantabria",
+        html_search=_html_search,
+        instant_search=lambda _q: [],
+    )
+    assert output is None
+    assert ranked == []
+    assert "Samuel Ruiz García" not in seen_queries
+
 
 
 def test_resolve_query_with_debug_marks_invalid_short_query() -> None:
