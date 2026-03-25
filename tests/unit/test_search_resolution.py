@@ -12,6 +12,7 @@ from graneye.resolution import (
     detect_name_match_quality,
     rank_candidates,
     resolve_identity,
+    ScoredCandidate,
 )
 from graneye.search import SearchResult, enrich_search_results
 
@@ -1302,3 +1303,141 @@ def test_mrbeast_public_identity_fallback_avoids_weak_canonical_quality() -> Non
     match = re.search(r"canonical_name_quality=([0-9.]+)", output.explanation)
     assert match is not None
     assert float(match.group(1)) >= 0.6
+
+
+def test_distinctive_context_prefers_official_bio_over_media_and_wikipedia() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang on AI demand surge",
+                    "url": "https://news.example.com/news/jensen-huang-ai-demand",
+                    "snippet": "Article about NVIDIA CEO Jensen Huang discussing AI demand.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/jensen-huang/",
+                    "snippet": "Official NVIDIA leadership bio.",
+                },
+                {
+                    "title": "Jensen Huang - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+                    "snippet": "Biography of Jensen Huang.",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    assert ranked[0].result.domain == "nvidia.com"
+    assert ranked[0].entity_type in {"official_bio", "official_profile"}
+
+
+@pytest.mark.parametrize(
+    ("name", "context", "resolve_kwargs"),
+    [
+        ("Jensen Huang", "NVIDIA founder CEO", {"role": "founder ceo", "organization": "NVIDIA"}),
+        ("Satya Nadella", "Microsoft executive", {"role": "executive", "organization": "Microsoft"}),
+        ("Lionel Messi", "football argentina", {"domain_activity": "football", "location": "argentina"}),
+        ("Taylor Swift", "music singer usa", {"role": "singer", "domain_activity": "music", "location": "usa"}),
+        ("MrBeast", "youtube", {"media_platform": "youtube"}),
+    ],
+)
+def test_distinctive_public_cases_resolve_stably(name: str, context: str, resolve_kwargs: dict[str, str]) -> None:
+    fixtures = {
+        "Jensen Huang": [
+            {
+                "title": "Jensen Huang - Founder and CEO",
+                "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/jensen-huang/",
+                "snippet": "Official NVIDIA bio.",
+            },
+            {
+                "title": "Jensen Huang keynote article",
+                "url": "https://news.example.com/event/jensen-huang-keynote",
+                "snippet": "Event article.",
+            },
+        ],
+        "Satya Nadella": [
+            {
+                "title": "Satya Nadella - Chairman and CEO",
+                "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                "snippet": "Official Microsoft leadership profile.",
+            }
+        ],
+        "Lionel Messi": [
+            {
+                "title": "Lionel Messi Official Website",
+                "url": "https://www.messi.com/en/biography/",
+                "snippet": "Official biography of Lionel Messi.",
+            }
+        ],
+        "Taylor Swift": [
+            {
+                "title": "Taylor Swift - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/Taylor_Swift",
+                "snippet": "American singer-songwriter Taylor Swift.",
+            },
+            {
+                "title": "Taylor Swift - YouTube",
+                "url": "https://www.youtube.com/@TaylorSwift",
+                "snippet": "Official channel",
+            }
+        ],
+        "MrBeast": [
+            {
+                "title": "MrBeast - YouTube",
+                "url": "https://www.youtube.com/@MrBeast",
+                "snippet": "Official channel",
+            }
+        ],
+    }
+    output = resolve_identity(name, enrich_search_results(fixtures[name]), raw_context=context, **resolve_kwargs)
+    assert output is not None
+    assert output.no_resolution is False
+
+
+def test_common_name_cases_remain_conservative_without_specific_support() -> None:
+    output = resolve_identity(
+        "Carlos Pérez",
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez - cybersecurity",
+                    "url": "https://profiles.example.com/in/carlos-perez",
+                    "snippet": "Cybersecurity consultant in Spain",
+                },
+                {
+                    "title": "Carlos Pérez article",
+                    "url": "https://news.example.com/article/carlos-perez",
+                    "snippet": "Event coverage",
+                },
+            ]
+        ),
+        domain_activity="cybersecurity",
+        location="Spain",
+        raw_context="Cybersecurity Spain",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+
+
+def test_search_only_fallback_is_conservative() -> None:
+    from graneye import cli
+
+    ranked = [
+        ScoredCandidate(
+            result=SearchResult(title="Q1 earnings report 2026", url="https://example.com/news/q1", domain="example.com", snippet="report"),
+            score=0.51,
+            entity_type="media_article",
+            name_match="weak_match",
+            context_strength=0.0,
+            authority_tier="reputable_media",
+            seo_penalty=0.0,
+            is_noise=False,
+            reasons=("entity:media_article",),
+        )
+    ]
+    output = cli._build_final_output(query_validity="valid", resolved=None, ranked=ranked)
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "search_only_unverified_candidate"
+    assert output.normalized_candidate_name == ""

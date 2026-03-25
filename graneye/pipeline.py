@@ -377,12 +377,18 @@ def _canonicalize_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if not parsed.scheme or not parsed.netloc:
         return url.strip()
-    query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not k.lower().startswith("utm_")]
+    filtered_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not k.lower().startswith("utm_")]
+    query_pairs = sorted(filtered_pairs, key=lambda item: (item[0], item[1]))
+    netloc = parsed.netloc.casefold().removeprefix("www.")
+    if netloc.endswith(":80") and parsed.scheme == "http":
+        netloc = netloc[:-3]
+    if netloc.endswith(":443") and parsed.scheme == "https":
+        netloc = netloc[:-4]
     cleaned = parsed._replace(
-        netloc=parsed.netloc.casefold().removeprefix("www."),
+        netloc=netloc,
         query=urlencode(query_pairs, doseq=True),
         fragment="",
-        path=parsed.path.rstrip("/") or "/",
+        path=re.sub(r"/+", "/", parsed.path.rstrip("/")) or "/",
     )
     return urlunparse(cleaned)
 

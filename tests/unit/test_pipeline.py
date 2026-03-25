@@ -292,3 +292,32 @@ def test_debug_and_non_debug_paths_share_same_semantic_resolution() -> None:
     assert output.normalized_candidate_name == debug_output.normalized_candidate_name
     assert output.confidence_label == debug_output.confidence_label
     assert [item.result.url for item in ranked] == [item.result.url for item in debug_ranked]
+
+
+def test_resolve_query_pool_permutation_keeps_resolution_semantics() -> None:
+    data = [
+        {
+            "title": "Jensen Huang - Founder and CEO",
+            "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/jensen-huang/?utm_source=abc",
+            "snippet": "Official NVIDIA bio",
+        },
+        {
+            "title": "Jensen Huang keynote",
+            "url": "https://news.example.com/event/jensen-huang-keynote",
+            "snippet": "Article",
+        },
+    ]
+    first, first_ranked = resolve_query("Jensen Huang", context="NVIDIA CEO", html_search=lambda _q: data, instant_search=lambda _q: list(reversed(data)))
+    second, second_ranked = resolve_query("Jensen Huang", context="NVIDIA CEO", html_search=lambda _q: list(reversed(data)), instant_search=lambda _q: data)
+    assert first is not None and second is not None
+    assert first.no_resolution == second.no_resolution
+    assert first.source_url == second.source_url
+    assert [item.result.url for item in first_ranked] == [item.result.url for item in second_ranked]
+
+
+def test_canonicalize_url_normalizes_www_utm_and_trailing_slash() -> None:
+    from graneye.pipeline import _canonicalize_url
+
+    a = _canonicalize_url("https://www.example.com/in/jane/?utm_source=x&utm_medium=y&b=2&a=1")
+    b = _canonicalize_url("https://example.com/in/jane?b=2&a=1")
+    assert a == b

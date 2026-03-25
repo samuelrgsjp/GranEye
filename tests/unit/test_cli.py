@@ -720,3 +720,36 @@ def test_batch_file_read_failure_returns_cli_error(capsys: pytest.CaptureFixture
     captured = capsys.readouterr()
     assert code == 3
     assert "failed to read batch input" in captured.err
+
+
+def test_invalid_query_override_applies_even_when_resolver_returns_resolved_for_numeric(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+
+    code = cli.main(["123456", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert payload["resolution_status"] == "no-resolution"
+    assert payload["no_resolution_reason"] == "invalid_query:numeric_or_garbage"
+
+
+def test_batch_human_and_jsonl_are_semantically_aligned_per_record(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+    input_data = "Jensen Huang	NVIDIA CEO\nSatya Nadella	Microsoft executive\n"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(input_data))
+    cli.main(["--batch"])
+    human = capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(input_data))
+    cli.main(["--batch", "--jsonl"])
+    jsonl = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+
+    assert "[1] Jensen Huang | NVIDIA CEO" in human
+    assert all(item["resolution_status"] == "resolved" for item in jsonl)
