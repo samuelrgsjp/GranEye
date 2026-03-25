@@ -121,6 +121,59 @@ def test_main_falls_back_to_search_only_when_resolution_missing(
     assert "Top candidate:" in captured.out
 
 
+def test_main_no_candidates_status_consistent_between_human_and_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (None, []))
+
+    human_code = cli.main(["Laura Gómez Martínez"])
+    human = capsys.readouterr()
+    assert human_code == 2
+    assert "Status: no-resolution" in human.out
+
+    json_code = cli.main(["Laura Gómez Martínez", "--json"])
+    machine = capsys.readouterr()
+    payload = json.loads(machine.out)
+    assert json_code == 2
+    assert payload["resolution_status"] == "no-resolution"
+
+
+def test_carlos_style_case_status_consistent_between_human_and_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = ResolutionOutput(
+        normalized_candidate_name="",
+        source_url="",
+        source_title="",
+        final_score=0.49,
+        entity_type="institutional_profile",
+        same_person_probability=0.49,
+        context_match_probability=0.21,
+        possible_role="cybersecurity",
+        possible_organization=None,
+        possible_location="Spain",
+        explanation="NO_RESOLUTION: insufficient absolute evidence for unique identity.",
+        no_resolution=True,
+        no_resolution_reason="insufficient_evidence",
+        confidence_label="low",
+    )
+    ranked = _fake_ranked("https://www.iansresearch.com/our-faculty/faculty/detail/carlos-perez")
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (output, ranked))
+
+    human_code = cli.main(["Carlos Pérez", "Cybersecurity Spain"])
+    human = capsys.readouterr()
+    assert human_code == 2
+    assert "Status: no-resolution" in human.out
+
+    json_code = cli.main(["Carlos Pérez", "Cybersecurity Spain", "--json"])
+    machine = capsys.readouterr()
+    payload = json.loads(machine.out)
+    assert json_code == 2
+    assert payload["resolution_status"] == "no-resolution"
+
+
 def test_main_handles_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -360,3 +413,21 @@ def test_invalid_query_reports_no_resolution_in_human_and_json(
     payload = json.loads(machine.out)
     assert json_code == 2
     assert payload["resolution_status"] == "no-resolution"
+
+
+def test_repeated_serialization_of_same_final_output_is_stable() -> None:
+    output = _fake_output()
+    first = cli._json_payload(
+        target_name="Laura Gómez Martínez",
+        target_context="Lawyer Barcelona",
+        query_validity="valid",
+        output=output,
+    )
+    second = cli._json_payload(
+        target_name="Laura Gómez Martínez",
+        target_context="Lawyer Barcelona",
+        query_validity="valid",
+        output=output,
+    )
+    assert first == second
+    assert cli._resolution_status(output) == "resolved"

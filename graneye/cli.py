@@ -5,7 +5,7 @@ import json
 import sys
 
 from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
-from .resolution import ResolutionOutput, assess_query_validity
+from .resolution import ResolutionOutput, ScoredCandidate, assess_query_validity
 from .search import search_duckduckgo_html, search_duckduckgo_instant_answer
 
 
@@ -106,7 +106,7 @@ def _render_debug_result_output(target_name: str, target_context: str | None, ou
 
 def _resolution_status(output: ResolutionOutput | None) -> str:
     if output is None:
-        return "resolved"
+        return "no-resolution"
     if output.no_resolution:
         return "no-resolution"
     if output.ambiguity_detected:
@@ -114,36 +114,106 @@ def _resolution_status(output: ResolutionOutput | None) -> str:
     return "resolved"
 
 
+def _build_final_output(
+    *,
+    query_validity: str,
+    resolved: ResolutionOutput | None,
+    ranked: list[ScoredCandidate],
+) -> ResolutionOutput:
+    if resolved is not None:
+        return resolved
+    if query_validity != "valid":
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            source_title="",
+            final_score=0.0,
+            entity_type="unknown",
+            same_person_probability=0.0,
+            context_match_probability=0.0,
+            possible_role=None,
+            possible_organization=None,
+            possible_location=None,
+            explanation=f"NO_RESOLUTION: invalid query ({query_validity}); hard rejection triggered.",
+            resolution_path="search_only",
+            fetch_status="not_attempted",
+            confidence_label="low",
+            ambiguity_detected=False,
+            ambiguity_reason=None,
+            no_resolution=True,
+            no_resolution_reason=f"invalid_query:{query_validity}",
+        )
+    if not ranked:
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            source_title="",
+            final_score=0.0,
+            entity_type="unknown",
+            same_person_probability=0.0,
+            context_match_probability=0.0,
+            possible_role=None,
+            possible_organization=None,
+            possible_location=None,
+            explanation="NO_RESOLUTION: no candidates found",
+            resolution_path="search_only",
+            fetch_status="not_attempted",
+            confidence_label="low",
+            ambiguity_detected=False,
+            ambiguity_reason=None,
+            no_resolution=True,
+            no_resolution_reason="no_candidates",
+        )
+    top = ranked[0]
+    return ResolutionOutput(
+        normalized_candidate_name=top.result.title or top.result.domain,
+        source_url=top.result.url,
+        source_title=top.result.title or "",
+        final_score=top.score,
+        entity_type=top.entity_type,
+        same_person_probability=top.score,
+        context_match_probability=top.context_strength,
+        possible_role=None,
+        possible_organization=None,
+        possible_location=None,
+        explanation="content fetch failed; using ranked search evidence only.",
+        resolution_path="search_only",
+        fetch_status="not_attempted",
+        confidence_label="low",
+        ambiguity_detected=False,
+        ambiguity_reason=None,
+        no_resolution=False,
+        no_resolution_reason=None,
+    )
+
+
 def _json_payload(
     *,
     target_name: str,
     target_context: str | None,
     query_validity: str,
-    output: ResolutionOutput | None,
-    has_ranked_candidates: bool,
+    output: ResolutionOutput,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "target_name": target_name,
         "target_context": target_context,
         "query_validity": query_validity,
         "resolution_status": _resolution_status(output),
-        "no_resolution_reason": output.no_resolution_reason if output else None,
-        "ambiguity_reason": output.ambiguity_reason if output else None,
-        "confidence": output.confidence_label if output else "low",
-        "top_candidate": output.normalized_candidate_name if output else None,
-        "source_url": output.source_url if output else None,
-        "display_title": output.source_title if output else None,
-        "same_person_probability": output.same_person_probability if output else None,
-        "context_match_probability": output.context_match_probability if output else None,
-        "entity_type": output.entity_type if output else None,
-        "decision_reason": output.explanation if output else ("content fetch failed; using ranked search evidence only." if has_ranked_candidates else "no candidates"),
+        "no_resolution_reason": output.no_resolution_reason,
+        "ambiguity_reason": output.ambiguity_reason,
+        "confidence": output.confidence_label,
+        "top_candidate": output.normalized_candidate_name or None,
+        "source_url": output.source_url or None,
+        "display_title": output.source_title or None,
+        "same_person_probability": output.same_person_probability,
+        "context_match_probability": output.context_match_probability,
+        "entity_type": output.entity_type,
+        "decision_reason": output.explanation,
     }
     return payload
 
 
-def _exit_code(output: ResolutionOutput | None, ranked_count: int) -> int:
-    if ranked_count == 0:
-        return 2
+def _exit_code(output: ResolutionOutput) -> int:
     status = _resolution_status(output)
     if status == "ambiguous":
         return 1
@@ -166,14 +236,14 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics: SearchPipelineDiagnostics | None = None
     try:
         if args.debug:
-            output, ranked, diagnostics = resolve_query_with_debug(
+            resolved_output, ranked, diagnostics = resolve_query_with_debug(
                 target_name,
                 context=context,
                 html_search=search_duckduckgo_html,
                 instant_search=search_duckduckgo_instant_answer,
             )
         else:
-            output, ranked = resolve_query(
+            resolved_output, ranked = resolve_query(
                 target_name,
                 context=context,
                 html_search=search_duckduckgo_html,
@@ -183,6 +253,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: failed to execute pipeline: {exc}", file=sys.stderr)
         return 3
 
+    final_output = _build_final_output(
+        query_validity=query_validity,
+        resolved=resolved_output,
+        ranked=ranked,
+    )
+
     if args.debug and diagnostics is not None:
         print(_render_debug_output(diagnostics))
 
@@ -191,54 +267,17 @@ def main(argv: list[str] | None = None) -> int:
             target_name=target_name,
             target_context=context,
             query_validity=query_validity,
-            output=output,
-            has_ranked_candidates=bool(ranked),
+            output=final_output,
         )
-        if output is None and ranked:
-            top = ranked[0]
-            payload["top_candidate"] = top.result.title or top.result.domain
-            payload["source_url"] = top.result.url
-            payload["display_title"] = top.result.title or None
-            payload["same_person_probability"] = top.score
-            payload["context_match_probability"] = top.context_strength
-            payload["entity_type"] = top.entity_type
         print(json.dumps(payload, ensure_ascii=False))
-        return _exit_code(output, len(ranked))
+        return _exit_code(final_output)
 
-    if not ranked:
-        print(
-            "\n".join(
-                [
-                    f"Name: {target_name}",
-                    f"Context: {context}" if context else "Context: (none)",
-                    "Status: no-resolution",
-                    "Confidence: low",
-                    "Top candidate: (none)",
-                    "Source URL: (none)",
-                    "Reason: no candidates found",
-                ]
-            )
-        )
-        return 2
-
-    if output is None:
-        top = ranked[0]
-        print(
-            "\n".join(
-                [
-                    f"Name: {target_name}",
-                    f"Context: {context}" if context else "Context: (none)",
-                    "Status: resolved",
-                    "Confidence: low",
-                    f"Top candidate: {top.result.title or top.result.domain}",
-                    f"Source URL: {top.result.url}",
-                ]
-            )
-        )
-        return 0
-
-    print(_render_debug_result_output(target_name, context, output) if args.debug else _render_output(target_name, context, output))
-    return _exit_code(output, len(ranked))
+    print(
+        _render_debug_result_output(target_name, context, final_output)
+        if args.debug
+        else _render_output(target_name, context, final_output)
+    )
+    return _exit_code(final_output)
 
 
 def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
