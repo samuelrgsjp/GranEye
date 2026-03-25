@@ -64,22 +64,22 @@ def test_name_match_quality_multilingual(query: str, title: str, snippet: str, e
             ],
             "https://profiles.example.com/in/jane-doe",
         ),
-        (
-            [
-                {
-                    "title": "Carlos Ruiz - Team",
-                    "url": "https://corp.example.com/team/carlos-ruiz",
+            (
+                [
+                    {
+                        "title": "Carlos Ruiz - Team",
+                        "url": "https://corp.example.com/team/carlos-ruiz",
                     "snippet": "Engineering leader",
                 },
                 {
                     "title": "Carlos Ruiz",
                     "url": "https://www.linkedin.com/in/carlos-ruiz/",
                     "snippet": "Data scientist based in Madrid",
-                },
-            ],
-            "https://www.linkedin.com/in/carlos-ruiz/",
-        ),
-    ],
+                    },
+                ],
+                "https://corp.example.com/team/carlos-ruiz",
+            ),
+        ],
 )
 def test_directory_and_aggregator_pages_do_not_outrank_profiles(raw_results: list[dict[str, str]], expected_top_url: str) -> None:
     results = enrich_search_results(raw_results)
@@ -188,6 +188,16 @@ def test_context_match_strength_works_with_title_only_reordered_context() -> Non
     assert any(reason.startswith("role_token_overlap") for reason in reasons)
 
 
+def test_non_person_wiki_page_not_mislabeled_as_person_profile() -> None:
+    result = SearchResult(
+        title="A - Wikipedia",
+        url="https://en.wikipedia.org/wiki/A",
+        domain="wikipedia.org",
+        snippet="Article about the letter A",
+    )
+    assert detect_entity_type(result) != "person_profile"
+
+
 def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> None:
     ranked = rank_candidates(
         enrich_search_results(
@@ -230,6 +240,29 @@ def test_context_aligned_company_page_can_beat_low_context_linkedin() -> None:
         ContextQuery(role="Platform Engineering Director", location="London"),
     )
     assert ranked[0].result.url == "https://exampleai.com/company/leadership/john-smith"
+
+
+def test_official_executive_page_outranks_contextual_article() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Satya Nadella comments on AI strategy",
+                    "url": "https://news.example.com/article/satya-nadella-ai-strategy",
+                    "snippet": "Contextual news headline about Microsoft CEO Satya Nadella.",
+                },
+                {
+                    "title": "Satya Nadella - Chairman and CEO",
+                    "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                    "snippet": "Official Microsoft leadership profile.",
+                },
+            ]
+        ),
+        "Satya Nadella",
+        ContextQuery(role="ceo", organization="microsoft"),
+    )
+    assert ranked[0].entity_type in {"official_profile", "official_bio"}
+    assert ranked[0].result.domain == "microsoft.com"
 
 
 def test_low_confidence_when_only_weak_generic_results_exist() -> None:
@@ -445,6 +478,50 @@ def test_invalid_numeric_query_forces_low_confidence() -> None:
     assert output is not None
     assert output.confidence_label == "low"
     assert output.ambiguity_reason == "invalid_query:numeric_or_garbage"
+
+
+def test_invalid_short_query_applies_explicit_score_cap() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "A profile",
+                    "url": "https://example.com/in/a",
+                    "snippet": "Generic profile page",
+                }
+            ]
+        ),
+        "a",
+        ContextQuery(),
+    )
+    assert ranked[0].score <= 0.42
+    assert ranked[0].score_cap_applied == 0.42
+    assert any("query_invalid_score_cap:too_short:0.42" in reason for reason in ranked[0].reasons)
+
+
+def test_encyclopedic_source_has_reduced_seo_penalty() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Ada Lovelace - Encyclopaedia Britannica biography facts",
+                    "url": "https://www.britannica.com/biography/Ada-Lovelace",
+                    "snippet": "Biography and facts about Ada Lovelace.",
+                },
+                {
+                    "title": "Ada Lovelace age net worth family biography facts",
+                    "url": "https://celeb-bio-now.example.com/ada-lovelace-biography",
+                    "snippet": "Age, net worth, relationship, family and career facts.",
+                },
+            ]
+        ),
+        "Ada Lovelace",
+        ContextQuery(),
+    )
+    brit = next(item for item in ranked if item.result.domain == "britannica.com")
+    seo = next(item for item in ranked if item.result.domain == "celeb-bio-now.example.com")
+    assert brit.seo_penalty < 0.05
+    assert seo.seo_penalty > brit.seo_penalty
 
 
 def test_common_name_without_context_remains_low_confidence() -> None:
