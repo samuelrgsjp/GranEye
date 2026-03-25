@@ -75,6 +75,9 @@ _OFFICIAL_DOMAIN_HINTS = {
     "nvidia.com",
     "apple.com",
     "openai.com",
+    "vatican.va",
+    "vaticannews.va",
+    "messi.com",
 }
 _REPUTABLE_MEDIA_HINTS = {
     "reuters.com",
@@ -150,6 +153,17 @@ _PERSON_ROLE_HINTS = {
     "lawyer",
     "scientist",
 }
+_NON_CORPORATE_OFFICIAL_HINTS = {
+    "vatican.va",
+    "vaticannews.va",
+    "messi.com",
+    "fifa.com",
+    "uefa.com",
+    "olympics.com",
+}
+_PRIMARY_OFFICIAL_ENTITY_TYPES = {"official_profile", "official_bio", "institutional_profile"}
+_STRUCTURED_PROFILE_DOMAINS = {"researchgate.net", "orcid.org", "about.me", "academia.edu"}
+_PLATFORM_SECONDARY_HINTS = {"gaming", "espanol", "español", "clips", "live", "shorts", "podcast", "music", "records"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -225,6 +239,19 @@ class QueryValidityAssessment:
     status: Literal["valid", "too_short", "too_generic", "non_person_like", "numeric_or_garbage"]
     penalty: float
     reasons: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class IdentityClusterEvidence:
+    key: str
+    candidates: tuple[ScoredCandidate, ...]
+    representative: ScoredCandidate
+    aggregate_score: float
+    independent_domains: int
+    official_support_count: int
+    strong_source_count: int
+    single_domain_only: bool
+    creator_asset_hierarchy_score: float
 
 
 def _normalized_tokens(value: str) -> list[str]:
@@ -332,6 +359,11 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
         if any(token in joined_text for token in ("professor", "attorney", "psychologist", "md", "phd", "chief", "ceo")):
             return "official_profile", ("official_segment_with_role_tokens",)
         return "institutional_profile", ("official_segment_without_person_signals",)
+
+    if domain in _NON_CORPORATE_OFFICIAL_HINTS:
+        if personish_tail or personish_title:
+            return "official_bio", ("non_corporate_official_domain_person_signal",)
+        return "institutional_profile", ("non_corporate_official_domain",)
 
     if any(segment in _COMPANY_HINTS for segment in path_segments):
         if personish_tail or personish_title:
@@ -491,7 +523,9 @@ def detect_source_authority(result: SearchResult) -> tuple[SourceAuthorityTier, 
     if domain.endswith("wikipedia.org") or "britannica.com" in domain:
         return "strong_encyclopedic", 0.18, ["encyclopedic_source"]
     if any(domain.endswith(suffix) for suffix in _OFFICIAL_DOMAIN_HINTS):
-        return "official_institutional", 0.24, ["official_or_institutional_domain"]
+        return "official_institutional", 0.26, ["official_or_institutional_domain"]
+    if any(domain.endswith(hint) for hint in _NON_CORPORATE_OFFICIAL_HINTS):
+        return "official_institutional", 0.25, ["non_corporate_official_domain"]
     if any(domain.endswith(media) for media in _REPUTABLE_MEDIA_HINTS):
         return "reputable_media", 0.16, ["reputable_media_domain"]
     if any(domain.endswith(network) for network in _NETWORK_PROFILE_DOMAINS):
@@ -614,9 +648,19 @@ def score_candidate(
         score += 0.08
         reasons.append("profile_structure_bonus")
 
+    exact_name = name_match in {"full_match", "reordered_match"}
+    explicit_org_alignment = bool(context.organization and normalize_name(context.organization) in _joined_text(result))
     if context.role and entity_type in {"official_profile", "official_bio"}:
         score += 0.06
         reasons.append("role_official_alignment_bonus")
+    if (
+        entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES
+        and authority_tier == "official_institutional"
+        and exact_name
+        and explicit_org_alignment
+    ):
+        score += 0.16
+        reasons.append("first_party_exact_name_org_priority")
     if context.media_platform and entity_type in {"person_profile", "media_article"}:
         score += 0.08
         reasons.append("creator_media_alignment_bonus")
@@ -686,6 +730,113 @@ def score_candidate(
         typing_confidence=_entity_typing_confidence(entity_type, entity_rationale),
         reasons=tuple(reasons),
     )
+
+
+def _platform_asset_owner(result: SearchResult) -> str:
+    parsed = urlparse(result.url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    for segment in segments:
+        lowered = segment.casefold()
+        if lowered.startswith("@") and len(lowered) > 1:
+            return normalize_name(lowered.removeprefix("@"))
+    if len(segments) >= 2 and segments[0].casefold() in {"channel", "user", "c"}:
+        return normalize_name(segments[1])
+    title_owner = _clean_title_fragment(result.title).split("|")[0].strip()
+    return normalize_name(title_owner)
+
+
+def _platform_asset_priority(result: SearchResult) -> float:
+    parsed = urlparse(result.url)
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    text = _joined_text(result)
+    if any(segment == "watch" for segment in segments):
+        return 0.2
+    if any(token in text for token in _PLATFORM_SECONDARY_HINTS):
+        return 0.55
+    if any(segment in {"music", "videos", "shorts"} for segment in segments):
+        return 0.45
+    if any(segment.startswith("@") for segment in segments):
+        return 1.0
+    if len(segments) >= 2 and segments[0] in {"channel", "user", "c"}:
+        return 0.9
+    return 0.6
+
+
+def _candidate_cluster_key(candidate: ScoredCandidate, query_name: str, context: ContextQuery) -> str:
+    haystack = _joined_text(candidate.result)
+    query_norm = normalize_name(query_name)
+    query_tokens = [token for token in query_norm.split() if token]
+    all_name_tokens_present = bool(query_tokens) and all(token in haystack for token in query_tokens)
+    if candidate.result.domain.endswith(tuple(_CREATOR_PLATFORM_DOMAINS)):
+        owner = _platform_asset_owner(candidate.result)
+        if owner and query_norm and query_norm in owner:
+            return f"platform_brand:{candidate.result.domain}:{query_norm}"
+        if owner:
+            return f"platform:{candidate.result.domain}:{owner}"
+    if all_name_tokens_present and context.organization:
+        org_norm = normalize_name(context.organization)
+        if org_norm and org_norm in haystack:
+            return f"org:{org_norm}|name:{query_norm}"
+    if all_name_tokens_present and context.institutional_hint:
+        institutional_norm = normalize_name(context.institutional_hint)
+        if institutional_norm and institutional_norm in haystack:
+            return f"institutional:{institutional_norm}|name:{query_norm}"
+    if (
+        all_name_tokens_present
+        and candidate.authority_tier == "official_institutional"
+        and candidate.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES
+    ):
+        return f"official:{query_norm}"
+    return f"url:{candidate.result.url.casefold()}"
+
+
+def _cluster_identity_evidence(ranked: list[ScoredCandidate], query_name: str, context: ContextQuery) -> list[IdentityClusterEvidence]:
+    grouped: dict[str, list[ScoredCandidate]] = {}
+    for candidate in ranked:
+        key = _candidate_cluster_key(candidate, query_name, context)
+        grouped.setdefault(key, []).append(candidate)
+    clusters: list[IdentityClusterEvidence] = []
+    for key, members in grouped.items():
+        representative = max(members, key=lambda item: item.score)
+        domains = {item.result.domain for item in members}
+        official_support_count = sum(1 for item in members if item.authority_tier == "official_institutional")
+        strong_source_count = sum(
+            1
+            for item in members
+            if item.authority_tier in {"official_institutional", "reputable_media", "strong_encyclopedic"}
+        )
+        aggregate = representative.score
+        aggregate += min(0.24, 0.08 * (len(members) - 1))
+        aggregate += min(0.2, 0.06 * (len(domains) - 1))
+        aggregate += min(0.16, 0.04 * strong_source_count)
+        creator_asset_score = 0.0
+        if representative.result.domain.endswith(tuple(_CREATOR_PLATFORM_DOMAINS)):
+            creator_asset_score = max(_platform_asset_priority(item.result) for item in members)
+            aggregate += 0.08 * creator_asset_score
+        clusters.append(
+            IdentityClusterEvidence(
+                key=key,
+                candidates=tuple(members),
+                representative=representative,
+                aggregate_score=min(1.0, aggregate),
+                independent_domains=len(domains),
+                official_support_count=official_support_count,
+                strong_source_count=strong_source_count,
+                single_domain_only=len(domains) <= 1,
+                creator_asset_hierarchy_score=creator_asset_score,
+            )
+        )
+    clusters.sort(
+        key=lambda item: (
+            -item.aggregate_score,
+            -item.official_support_count,
+            -item.independent_domains,
+            -item.strong_source_count,
+            -item.creator_asset_hierarchy_score,
+            -item.representative.score,
+        )
+    )
+    return clusters
 
 
 def _entity_typing_confidence(entity_type: EntityType, reasons: tuple[str, ...]) -> float:
@@ -1002,8 +1153,11 @@ def resolve_identity(
             no_resolution_reason=f"invalid_query:{query_validity.status}",
         )
 
-    top = ranked[0]
-    second = ranked[1] if len(ranked) > 1 else None
+    clusters = _cluster_identity_evidence(ranked, query_name, context)
+    winning_cluster = clusters[0]
+    top = winning_cluster.representative
+    second_cluster = clusters[1] if len(clusters) > 1 else None
+    second = second_cluster.representative if second_cluster else None
     content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
     normalized_name, role, organization, inferred_location = infer_profile_signals(content)
     canonical_name, canonical_name_quality, canonical_name_source = _derive_candidate_name(content)
@@ -1029,7 +1183,7 @@ def resolve_identity(
     else:
         resolution_path = "search_only"
 
-    score_gap = top.score - second.score if second else 1.0
+    score_gap = winning_cluster.aggregate_score - second_cluster.aggregate_score if second_cluster else 1.0
     source_diversity = len({item.result.domain for item in ranked[:5]})
     has_context_constraints = any(
         [
@@ -1044,12 +1198,12 @@ def resolve_identity(
         ]
     )
     weak_top_evidence = (
-        top.score < 0.52
+        winning_cluster.aggregate_score < 0.52
         or top.name_match == "weak_match"
         or top.entity_type in {"unknown", "generic_article", "aggregator_profile", "directory_listing"}
         or top.authority_tier in {"directory_aggregator", "low_authority_bio_seo", "junk_or_malformed"}
     )
-    close_competition = second is not None and score_gap < 0.1 and second.score > 0.44
+    close_competition = second_cluster is not None and score_gap < 0.1 and second_cluster.aggregate_score > 0.44
     common_name_competition = (
         not has_context_constraints
         and second is not None
@@ -1063,8 +1217,10 @@ def resolve_identity(
         and top.context_strength >= 0.18
         and score_gap >= 0.1
     )
-    evidence_strength = top.score - query_validity.penalty
-    if source_diversity >= 3:
+    evidence_strength = winning_cluster.aggregate_score - query_validity.penalty
+    if winning_cluster.independent_domains >= 2:
+        evidence_strength += 0.08
+    elif source_diversity >= 3:
         evidence_strength += 0.05
     if second is not None and score_gap >= 0.16:
         evidence_strength += 0.04
@@ -1094,7 +1250,7 @@ def resolve_identity(
             ambiguity_reason = None
 
     strong_top_profile = (
-        top.score >= 0.62
+        winning_cluster.aggregate_score >= 0.62
         and top.name_match in {"full_match", "reordered_match"}
         and top.entity_type in {"official_profile", "official_bio", "institutional_profile", "person_profile", "reference_entry"}
     )
@@ -1109,7 +1265,7 @@ def resolve_identity(
         not has_context_constraints
         and query_validity.status == "valid"
         and query_token_count <= 2
-        and second is not None
+        and second_cluster is not None
         and top.authority_tier not in {"official_institutional"}
     ):
         confidence_label = "low"
@@ -1124,8 +1280,28 @@ def resolve_identity(
         confidence_label = "high"
     if explicit_org_alignment and top.name_match in {"full_match", "reordered_match"} and score_gap >= 0.1:
         confidence_label = "high"
-    if top.authority_tier == "official_institutional" and top.score >= 0.9 and top.name_match in {"full_match", "reordered_match"}:
+    if (
+        top.authority_tier == "official_institutional"
+        and top.score >= 0.9
+        and top.name_match in {"full_match", "reordered_match"}
+    ):
         confidence_label = "high"
+
+    only_single_cluster_source = (
+        len(winning_cluster.candidates) == 1
+        or winning_cluster.independent_domains <= 1
+    )
+    single_encyclopedic_fallback = top.authority_tier == "strong_encyclopedic" and only_single_cluster_source
+    if only_single_cluster_source and not (
+        top.authority_tier == "official_institutional"
+        and top.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES
+        and top.name_match in {"full_match", "reordered_match"}
+    ):
+        if confidence_label == "high":
+            confidence_label = "medium"
+        evidence_strength = min(evidence_strength, 0.72)
+    if single_encyclopedic_fallback:
+        confidence_label = "low"
 
     wikipedia_fallback_without_context = (
         top.result.domain.endswith("wikipedia.org")
@@ -1137,7 +1313,7 @@ def resolve_identity(
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
-            final_score=top.score,
+            final_score=winning_cluster.aggregate_score,
             entity_type=top.entity_type,
             same_person_probability=0.0,
             context_match_probability=top.context_strength,
@@ -1154,14 +1330,41 @@ def resolve_identity(
             ambiguity_detected=True,
             ambiguity_reason="generic_fallback_without_context_support",
             no_resolution=True,
-            no_resolution_reason="common_name_weak_context",
+            no_resolution_reason="generic_encyclopedic_fallback_without_support",
+        )
+
+    common_name_structured_profile_only = (
+        top.result.domain.endswith(tuple(_STRUCTURED_PROFILE_DOMAINS))
+        and winning_cluster.independent_domains == 1
+        and winning_cluster.official_support_count == 0
+        and winning_cluster.strong_source_count <= 1
+    )
+    if common_name_structured_profile_only and top.context_strength < 0.42:
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            final_score=winning_cluster.aggregate_score,
+            entity_type=top.entity_type,
+            same_person_probability=same_person_probability,
+            context_match_probability=context_probability,
+            possible_role=role,
+            possible_organization=organization,
+            possible_location=inferred_location,
+            explanation="NO_RESOLUTION: common-name structured profile without independent corroboration.",
+            resolution_path=resolution_path,
+            fetch_status=fetch_status,
+            confidence_label="low",
+            ambiguity_detected=False,
+            ambiguity_reason=None,
+            no_resolution=True,
+            no_resolution_reason="common_name_structured_profile_without_corroboration",
         )
 
     if insufficient_evidence and not ambiguity_detected:
         return ResolutionOutput(
             normalized_candidate_name="",
             source_url="",
-            final_score=top.score,
+            final_score=winning_cluster.aggregate_score,
             entity_type=top.entity_type,
             same_person_probability=same_person_probability,
             context_match_probability=context_probability,
@@ -1191,6 +1394,8 @@ def resolve_identity(
         f"canonical_name_quality={canonical_name_quality:.2f}; canonical_name_source={canonical_name_source}; "
         f"name_source={'derived' if normalized_name else 'query_fallback'}; "
         f"signals: {', '.join(top.reasons[:8])}; "
+        f"cluster_key={winning_cluster.key}; cluster_sources={len(winning_cluster.candidates)}; "
+        f"cluster_domains={winning_cluster.independent_domains}; "
         f"path={resolution_path}; fetch={fetch_status}; score_gap={score_gap:.3f}; "
         f"evidence={evidence_strength:.3f}; confidence={confidence_label}"
     )
