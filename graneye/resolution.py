@@ -124,6 +124,31 @@ _ORG_PATH_HINTS = {
     "newsroom",
 }
 _PERSONISH_TOKENS = {"mr", "mrs", "ms", "dr", "prof", "ceo", "founder", "president"}
+_NOISE_TEXT_HINTS = {
+    "privacy",
+    "cookie",
+    "consent",
+    "terms",
+    "your privacy choices",
+    "opt out",
+    "sign in",
+    "subscribe",
+    "menu",
+    "navigation",
+}
+_PERSON_ROLE_HINTS = {
+    "ceo",
+    "chief",
+    "founder",
+    "president",
+    "engineer",
+    "director",
+    "manager",
+    "professor",
+    "attorney",
+    "lawyer",
+    "scientist",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -187,6 +212,8 @@ class ResolutionOutput:
     confidence_label: Literal["high", "medium", "low"] = "medium"
     ambiguity_detected: bool = False
     ambiguity_reason: str | None = None
+    no_resolution: bool = False
+    no_resolution_reason: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -659,6 +686,7 @@ class _HTMLSignalParser(HTMLParser):
         self._in_title = False
         self._in_heading: str | None = None
         self._in_ignored = False
+        self._blocked_stack: list[bool] = []
         self.title = ""
         self.meta_description = ""
         self.headings: list[str] = []
@@ -667,6 +695,11 @@ class _HTMLSignalParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.casefold()
         attrs_dict = {key.casefold(): (value or "") for key, value in attrs}
+        class_id_blob = " ".join((attrs_dict.get("class", ""), attrs_dict.get("id", ""))).casefold()
+        should_block = lowered in {"header", "footer", "nav", "aside", "svg", "button", "form"} or any(
+            hint in class_id_blob for hint in {"cookie", "consent", "privacy", "footer", "header", "menu", "nav"}
+        )
+        self._blocked_stack.append(should_block)
         if lowered in {"script", "style", "noscript"}:
             self._in_ignored = True
         if lowered == "title":
@@ -678,6 +711,8 @@ class _HTMLSignalParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
+        if self._blocked_stack:
+            self._blocked_stack.pop()
         if lowered in {"script", "style", "noscript"}:
             self._in_ignored = False
         if lowered == "title":
@@ -687,7 +722,12 @@ class _HTMLSignalParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         text = " ".join(data.split())
-        if not text or self._in_ignored:
+        if not text or self._in_ignored or any(self._blocked_stack):
+            return
+        lowered = text.casefold()
+        if any(hint in lowered for hint in _NOISE_TEXT_HINTS):
+            return
+        if len(text) > 220:
             return
         if self._in_title:
             self.title = f"{self.title} {text}".strip()
@@ -763,7 +803,7 @@ def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None
     merged = " | ".join(
         part for part in [content.page_title, content.meta_description, " ".join(content.headings), content.main_text] if part
     )
-    normalized_name = normalize_name(content.page_title.split("|")[0]) if content.page_title else ""
+    normalized_name = _derive_candidate_name(content)
 
     role_match = re.search(
         r"\b(engineer|developer|manager|director|analyst|researcher|journalist|designer|actor|actress|musician|professor|creator|streamer|author|lawyer|psychologist)\b",
@@ -779,6 +819,44 @@ def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None
         org_match.group(1).strip() if org_match else None,
         location_match.group(1).strip() if location_match else None,
     )
+
+
+def _clean_title_fragment(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip(" -|•:")
+    cleaned = re.split(r"\s[|\-–:]\s", cleaned)[0].strip()
+    return cleaned
+
+
+def _looks_person_like_text(value: str) -> bool:
+    if not value:
+        return False
+    lowered = value.casefold()
+    if any(hint in lowered for hint in _NOISE_TEXT_HINTS):
+        return False
+    tokens = [token for token in _normalized_tokens(value) if token]
+    if len(tokens) < 2:
+        return False
+    alpha_tokens = [token for token in tokens if any(char.isalpha() for char in token)]
+    if len(alpha_tokens) < 2:
+        return False
+    if any(token in _PERSON_ROLE_HINTS for token in alpha_tokens):
+        return True
+    return all(token not in _NON_PERSON_TITLE_HINTS for token in alpha_tokens[:3])
+
+
+def _derive_candidate_name(content: TopCandidateContent) -> str:
+    candidates = [
+        _clean_title_fragment(content.page_title),
+        *[_clean_title_fragment(heading) for heading in content.headings[:4]],
+        _clean_title_fragment(content.meta_description),
+    ]
+    for candidate in candidates:
+        if _looks_person_like_text(candidate):
+            return normalize_name(candidate)
+    title_head = _clean_title_fragment(content.page_title)
+    if title_head and not any(hint in title_head.casefold() for hint in _NOISE_TEXT_HINTS):
+        return normalize_name(title_head)
+    return ""
 
 
 def rank_candidates(results: Iterable[SearchResult], query_name: str, context: ContextQuery) -> list[ScoredCandidate]:
@@ -821,6 +899,28 @@ def resolve_identity(
     if not ranked:
         return None
     query_validity = assess_query_validity(query_name)
+
+    invalid_hard_reject = query_validity.status in {"too_short", "numeric_or_garbage", "non_person_like"}
+    if invalid_hard_reject:
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            final_score=0.0,
+            entity_type="unknown",
+            same_person_probability=0.0,
+            context_match_probability=0.0,
+            possible_role=None,
+            possible_organization=None,
+            possible_location=None,
+            explanation=f"NO_RESOLUTION: invalid query ({query_validity.status}); hard rejection triggered.",
+            resolution_path="search_only",
+            fetch_status="not_attempted",
+            confidence_label="low",
+            ambiguity_detected=True,
+            ambiguity_reason=f"invalid_query:{query_validity.status}",
+            no_resolution=True,
+            no_resolution_reason=f"invalid_query:{query_validity.status}",
+        )
 
     top = ranked[0]
     second = ranked[1] if len(ranked) > 1 else None
@@ -868,13 +968,23 @@ def resolve_identity(
         and second.name_match in {"full_match", "reordered_match", "partial_match"}
         and score_gap < 0.22
     )
+    official_superiority = (
+        top.authority_tier == "official_institutional"
+        and top.name_match in {"full_match", "reordered_match"}
+        and top.context_strength >= 0.22
+        and score_gap >= 0.12
+    )
     ambiguity_detected = low_evidence or close_competition or common_name_competition or query_validity.status != "valid"
+    if official_superiority:
+        ambiguity_detected = False
     ambiguity_reason = None
     evidence_strength = top.score - query_validity.penalty
     if source_diversity >= 3:
         evidence_strength += 0.05
     if second is not None and score_gap >= 0.18:
         evidence_strength += 0.04
+    if official_superiority:
+        evidence_strength += 0.08
     confidence_label: Literal["high", "medium", "low"] = "high"
     if ambiguity_detected or evidence_strength < 0.48:
         confidence_label = "low"
@@ -897,11 +1007,43 @@ def resolve_identity(
         ambiguity_detected = True
         ambiguity_reason = ambiguity_reason or "multiple_plausible_candidates"
 
+    wikipedia_fallback_without_context = (
+        top.result.domain.endswith("wikipedia.org")
+        and top.context_strength < 0.2
+        and (second is None or score_gap < 0.2)
+        and query_validity.status == "valid"
+    )
+    if wikipedia_fallback_without_context:
+        return ResolutionOutput(
+            normalized_candidate_name="",
+            source_url="",
+            final_score=top.score,
+            entity_type=top.entity_type,
+            same_person_probability=0.0,
+            context_match_probability=top.context_strength,
+            possible_role=None,
+            possible_organization=None,
+            possible_location=None,
+            explanation=(
+                "NO_RESOLUTION: generic encyclopedic fallback without context support; "
+                f"score={top.score:.3f}; score_gap={score_gap:.3f}; source_diversity={source_diversity}"
+            ),
+            resolution_path=resolution_path,
+            fetch_status=fetch_status,
+            confidence_label="low",
+            ambiguity_detected=True,
+            ambiguity_reason="generic_fallback_without_context_support",
+            no_resolution=True,
+            no_resolution_reason="common_name_weak_context",
+        )
+
     prefix = "AMBIGUOUS: " if ambiguity_detected else ""
     explanation = (
         f"{prefix}Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
         f"authority={top.authority_tier}; seo_penalty={top.seo_penalty:.2f}; "
         f"query_validity={query_validity.status}; score_cap={top.score_cap_applied if top.score_cap_applied is not None else 'none'}; "
+        f"official_superiority_bonus={'yes' if official_superiority else 'no'}; "
+        f"name_source={'derived' if normalized_name else 'query_fallback'}; "
         f"signals: {', '.join(top.reasons[:8])}; "
         f"path={resolution_path}; fetch={fetch_status}; score_gap={score_gap:.3f}; "
         f"evidence={evidence_strength:.3f}; confidence={confidence_label}"
@@ -923,4 +1065,6 @@ def resolve_identity(
         confidence_label=confidence_label,
         ambiguity_detected=ambiguity_detected,
         ambiguity_reason=ambiguity_reason,
+        no_resolution=False,
+        no_resolution_reason=None,
     )

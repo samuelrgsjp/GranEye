@@ -41,10 +41,21 @@ def _is_blank(value: str | None) -> bool:
 
 
 def _render_output(target_name: str, target_context: str | None, output: ResolutionOutput, top: SearchResult) -> str:
+    if output.no_resolution:
+        lines = [
+            f"Target name: {target_name}",
+            f"Target context: {target_context}" if target_context else "Target context: (none)",
+            "Resolution: no-resolution",
+            f"Reason: {output.no_resolution_reason or output.ambiguity_reason or 'unknown'}",
+            f"Confidence: {output.confidence_label}",
+            f"Decision reason: {output.explanation}",
+        ]
+        return "\n".join(lines)
+
     lines = [
         f"Target name: {target_name}",
         f"Target context: {target_context}" if target_context else "Target context: (none)",
-        f"Top candidate: {output.normalized_candidate_name}",
+        f"Top candidate: {output.normalized_candidate_name or '(unknown)'}",
         f"Source URL: {output.source_url}",
         f"Display title: {top.title or '(not available)'}",
         f"Score: {output.final_score:.3f}",
