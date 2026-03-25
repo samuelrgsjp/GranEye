@@ -222,6 +222,61 @@ def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> N
     assert ranked[0].result.url == "https://security-spain.example.org/in/carlos-perez"
 
 
+def test_private_person_context_aligned_structured_profile_beats_wikipedia_contamination() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Samuel Ruiz García - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Samuel_Ruiz",
+                    "snippet": "Public figure with similar name.",
+                },
+                {
+                    "title": "Samuel Ruiz García | LinkedIn",
+                    "url": "https://www.linkedin.com/in/samuel-ruiz-garcia",
+                    "snippet": "System Administrator at Netkia in Cantabria, Spain.",
+                },
+                {
+                    "title": "Samuel Ruiz García - Netkia Team",
+                    "url": "https://www.netkia.com/team/samuel-ruiz-garcia",
+                    "snippet": "Administrador de sistemas en Netkia Cantabria.",
+                },
+            ]
+        ),
+        "Samuel Ruiz García",
+        ContextQuery(role="system administrator", organization="Netkia", location="Cantabria"),
+    )
+    assert ranked[0].result.domain in {"netkia.com", "linkedin.com"}
+    assert ranked[1].result.domain in {"netkia.com", "linkedin.com"}
+    assert ranked[0].result.domain != ranked[1].result.domain
+    assert ranked[-1].result.domain.endswith("wikipedia.org")
+
+
+def test_common_name_with_single_context_aligned_profile_remains_no_resolution() -> None:
+    output = resolve_identity(
+        "Samuel Ruiz García",
+        enrich_search_results(
+            [
+                {
+                    "title": "Samuel Ruiz García | LinkedIn",
+                    "url": "https://www.linkedin.com/in/samuel-ruiz-garcia",
+                    "snippet": "Professional profile.",
+                },
+                {
+                    "title": "Samuel Ruiz - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Samuel_Ruiz",
+                    "snippet": "Public figure page for another same-name person.",
+                },
+            ]
+        ),
+        role="system administrator",
+        organization="Netkia",
+        location="Cantabria",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+
+
 def test_context_aligned_company_page_can_beat_low_context_linkedin() -> None:
     ranked = rank_candidates(
         enrich_search_results(

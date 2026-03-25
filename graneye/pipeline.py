@@ -103,6 +103,10 @@ _ROLE_HINTS = {
     "founder",
     "cofounder",
     "co-founder",
+    "administrator",
+    "administrador",
+    "systems",
+    "sistemas",
 }
 _PLATFORM_HINTS = {"youtube", "twitch", "tiktok", "instagram", "x", "twitter", "linkedin", "github", "wikipedia"}
 _INSTITUTIONAL_HINTS = {"university", "faculty", "department", "staff", "official", "government", "ministerio"}
@@ -122,16 +126,57 @@ _KNOWN_LOCATION_TOKENS = {
     "rome",
     "argentina",
     "usa",
+    "cantabria",
+    "españa",
+    "espana",
 }
 _ACTIVITY_HINTS = {"cybersecurity", "security", "software", "cloud", "finance", "healthcare", "ai", "ml", "data"}
-_ORG_STOPWORDS = _ROLE_HINTS | {"founder", "cofounder", "co-founder", "chairman", "music", "football", "youtube"}
+_ORG_STOPWORDS = _ROLE_HINTS | {
+    "founder",
+    "cofounder",
+    "co-founder",
+    "chairman",
+    "music",
+    "football",
+    "youtube",
+    "system",
+    "sistemas",
+}
 _ROLE_PHRASES = (
     "software engineer",
     "platform engineering director",
     "data engineer",
     "machine learning engineer",
     "security engineer",
+    "system administrator",
+    "administrador de sistemas",
 )
+_PRIVATE_PROFILE_MARKERS = (
+    "linkedin",
+    "staff",
+    "team",
+    "profile",
+    "people",
+    "about",
+    "equipo",
+    "plantilla",
+    "personal",
+    "perfil",
+    "empresa",
+)
+
+
+def _private_person_context_strength(context_data: ContextQuery) -> int:
+    return sum(
+        1
+        for value in (
+            context_data.role,
+            context_data.organization,
+            context_data.location,
+            context_data.domain_activity,
+        )
+        if value
+    )
 
 
 def _parse_context(context: str | None) -> ContextQuery:
@@ -194,8 +239,12 @@ def _parse_context(context: str | None) -> ContextQuery:
         if role_positions:
             first_role_idx = role_positions[0]
             prefix = words[:first_role_idx]
-            if prefix and any(piece[:1].isupper() for piece in prefix):
+            if prefix and any(piece[:1].isupper() for piece in prefix) and all(
+                piece.casefold() not in _KNOWN_LOCATION_TOKENS for piece in prefix
+            ):
                 organization = " ".join(prefix).strip()
+    if organization is None and len(words) == 2 and tokens[1] in _KNOWN_LOCATION_TOKENS and role is None:
+        organization = words[0].strip()
     if organization is None and len(words) >= 2:
         inferred_org_tokens: list[str] = []
         for original, lowered_token in zip(words, tokens):
@@ -229,7 +278,14 @@ def _parse_context(context: str | None) -> ContextQuery:
     generic_terms = tuple(
         token for token in dict.fromkeys(tokens) if token not in _STOP_TOKENS and token not in _LOCATION_PREPOSITIONS
     )
-    if domain_activity is None and normalized and len(tokens) <= 4 and not any(char.isdigit() for char in normalized) and role is None:
+    if (
+        domain_activity is None
+        and organization is None
+        and normalized
+        and len(tokens) <= 4
+        and not any(char.isdigit() for char in normalized)
+        and role is None
+    ):
         filtered = [word for word in words if word.casefold() not in _KNOWN_LOCATION_TOKENS and word.casefold() not in _PLATFORM_HINTS]
         if filtered:
             domain_activity = " ".join(filtered).strip()
@@ -256,21 +312,51 @@ def _query_variants(target_name: str, context: str | None) -> list[str]:
         return [base, f"\"{base}\""]
     hint_fragments = [context_data.role, context_data.organization, context_data.location, context_data.media_platform, context_data.institutional_hint]
     compact_hints = " ".join(part for part in hint_fragments if part).strip()
-    variants = [
-        f"{base} {context_clean}",
-        f"\"{base}\" {context_clean}",
-        f"{base} {context_clean} profile",
-        f"{base} {context_clean} biography",
-        f"\"{base}\" {context_clean} site:.edu",
-        f"{base} {context_clean} official",
-        f"{base} {context_clean} public profile",
-        f"\"{base}\" {context_clean} official bio",
-        f"{base} {context_clean} linkedin",
-        f"{base} {context_clean} wikipedia",
-        base,
-        f"\"{base}\"",
-        f"{base} profile",
-    ]
+    private_context = _private_person_context_strength(context_data) >= 1 and not (
+        context_data.media_platform or context_data.institutional_hint
+    )
+    variants = [f"{base} {context_clean}", f"\"{base}\" {context_clean}"]
+    if private_context:
+        if context_data.organization:
+            variants.extend(
+                [
+                    f"\"{base}\" \"{context_data.organization}\"",
+                    f"{base} {context_data.organization} linkedin",
+                    f"{base} {context_data.organization} staff",
+                    f"{base} {context_data.organization} team",
+                    f"{base} {context_data.organization} profile",
+                    f"{base} {context_data.organization} people",
+                ]
+            )
+            if context_data.location:
+                variants.append(f"\"{base}\" \"{context_data.organization}\" \"{context_data.location}\"")
+        if context_data.role:
+            variants.append(f"\"{base}\" \"{context_data.role}\"")
+            if context_data.location:
+                variants.append(f"\"{base}\" \"{context_data.role}\" \"{context_data.location}\"")
+            if context_data.organization:
+                variants.append(f"\"{base}\" \"{context_data.role}\" \"{context_data.organization}\"")
+        if context_data.location:
+            variants.extend([f"{base} {context_data.location} linkedin", f"\"{base}\" \"{context_data.location}\" linkedin"])
+        for marker in _PRIVATE_PROFILE_MARKERS:
+            variants.append(f"{base} {context_clean} {marker}")
+        variants.extend([f"{base} linkedin", f"{base} profile", f"{base} {context_clean} company"])
+    else:
+        variants.extend(
+            [
+                f"{base} {context_clean} profile",
+                f"{base} {context_clean} biography",
+                f"\"{base}\" {context_clean} site:.edu",
+                f"{base} {context_clean} official",
+                f"{base} {context_clean} public profile",
+                f"\"{base}\" {context_clean} official bio",
+                f"{base} {context_clean} linkedin",
+                f"{base} {context_clean} wikipedia",
+                base,
+                f"\"{base}\"",
+                f"{base} profile",
+            ]
+        )
     if compact_hints:
         variants.extend(
             [
@@ -298,6 +384,7 @@ def _run_search(
     *,
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
+    enable_name_only_fallback: bool,
 ) -> tuple[list[Mapping[str, str]], tuple[str, ...]]:
     candidate_pool: list[tuple[str, str, str, str, str, str, str, Mapping[str, str]]] = []
     attempted_queries: list[str] = []
@@ -313,7 +400,7 @@ def _run_search(
             instant_results = []
 
         merged_sources = [*raw_results, *instant_results]
-        if len(merged_sources) <= 1 and " " in query_text:
+        if enable_name_only_fallback and len(merged_sources) <= 1 and " " in query_text:
             # Name-only fallback for weak one-result query outcomes.
             quoted = re.findall(r'"([^"]+)"', query_text)
             if quoted:
@@ -460,15 +547,17 @@ def _execute_resolution_pipeline(
     html_search: Callable[[str], list[Mapping[str, str]]],
     instant_search: Callable[[str], list[Mapping[str, str]]],
 ) -> _PipelineExecution:
+    parsed_context = _parse_context(context)
+    name_only_fallback_enabled = not (parsed_context.organization or parsed_context.location)
     combined_results, query_attempts = _run_search(
         _query_variants(target_name, context),
         html_search=html_search,
         instant_search=instant_search,
+        enable_name_only_fallback=name_only_fallback_enabled,
     )
 
     normalized_results = normalize_search_results(combined_results)
     search_results, filter_decisions = filter_search_results(normalized_results)
-    parsed_context = _parse_context(context)
     ranked = rank_candidates(
         search_results,
         target_name,
