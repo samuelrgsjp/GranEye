@@ -1200,6 +1200,26 @@ def _derive_candidate_name(content: TopCandidateContent, *, query_name: str = ""
     return "", 0.1, "weak_fallback"
 
 
+def _derive_representative_identity(candidate: ScoredCandidate, query_name: str) -> str:
+    query_tokens = set(_normalized_tokens(query_name))
+    title_fragment = _clean_title_fragment(candidate.result.title)
+    if title_fragment:
+        normalized_title = normalize_name(title_fragment)
+        title_tokens = set(_normalized_tokens(normalized_title))
+        overlap = bool(query_tokens and title_tokens and query_tokens & title_tokens)
+        if _looks_person_like_text(title_fragment) and overlap:
+            return normalized_title
+        if _looks_public_identity_alias(title_fragment, query_name=query_name):
+            return normalized_title
+    if candidate.result.domain.endswith(tuple(_CREATOR_PLATFORM_DOMAINS)):
+        owner = _platform_asset_owner(candidate.result)
+        if owner:
+            return owner
+    if candidate.name_match in {"full_match", "reordered_match", "partial_match"}:
+        return normalize_name(query_name)
+    return ""
+
+
 def rank_candidates(results: Iterable[SearchResult], query_name: str, context: ContextQuery) -> list[ScoredCandidate]:
     """Rank all candidates deterministically using evidence-driven heuristics."""
 
@@ -1287,14 +1307,26 @@ def resolve_identity(
     clusters = _cluster_identity_evidence(ranked, query_name, context)
     winning_cluster = clusters[0]
     top = winning_cluster.representative
+    representative_identity = _derive_representative_identity(top, query_name)
     second_cluster = clusters[1] if len(clusters) > 1 else None
     second = second_cluster.representative if second_cluster else None
     content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
-    normalized_name, role, organization, inferred_location = infer_profile_signals(content)
+    _, role, organization, inferred_location = infer_profile_signals(content)
+    normalized_name = representative_identity
     canonical_name, canonical_name_quality, canonical_name_source = _derive_candidate_name(content, query_name=query_name)
     if not canonical_name:
+        query_tokens = [token for token in _normalized_tokens(query_name) if token]
+        if (
+            len(query_tokens) == 1
+            and top.authority_tier in {"strong_encyclopedic", "official_institutional", "public_structured_profile"}
+            and top.name_match in {"full_match", "reordered_match"}
+            and top.context_strength >= 0.12
+        ):
+            canonical_name = normalize_name(query_name)
+            canonical_name_quality = 0.66
+            canonical_name_source = "representative_query_fallback"
         fallback_title = _clean_title_fragment(top.result.title)
-        if _looks_person_like_text(fallback_title):
+        if not canonical_name and _looks_person_like_text(fallback_title):
             canonical_name = normalize_name(fallback_title)
             canonical_name_quality = 0.62
             canonical_name_source = "search_title_fallback"
