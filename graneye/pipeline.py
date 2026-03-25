@@ -89,6 +89,27 @@ _PLATFORM_HINTS = {"youtube", "twitch", "tiktok", "instagram", "x", "twitter", "
 _INSTITUTIONAL_HINTS = {"university", "faculty", "department", "staff", "official", "government", "ministerio"}
 _LOCATION_PREPOSITIONS = {"in", "en", "de", "from", "at"}
 _STOP_TOKENS = {"the", "a", "an", "and", "of", "del", "la", "el"}
+_KNOWN_LOCATION_TOKENS = {
+    "spain",
+    "madrid",
+    "london",
+    "seattle",
+    "austin",
+    "boston",
+    "barcelona",
+    "valencia",
+    "paris",
+    "berlin",
+    "rome",
+}
+_ACTIVITY_HINTS = {"cybersecurity", "security", "software", "cloud", "finance", "healthcare", "ai", "ml", "data"}
+_ROLE_PHRASES = (
+    "software engineer",
+    "platform engineering director",
+    "data engineer",
+    "machine learning engineer",
+    "security engineer",
+)
 
 
 def _parse_context(context: str | None) -> ContextQuery:
@@ -106,57 +127,68 @@ def _parse_context(context: str | None) -> ContextQuery:
     institutional_hint: str | None = None
     domain_activity: str | None = None
 
-    tokens = [token for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", normalized.casefold()) if token]
-    token_set = set(tokens)
-    role_tokens = [token for token in tokens if token in _ROLE_HINTS]
-    platform_tokens = [token for token in tokens if token in _PLATFORM_HINTS]
-    institutional_tokens = [token for token in tokens if token in _INSTITUTIONAL_HINTS]
+    words = [token for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", normalized) if token]
+    tokens = [token.casefold() for token in words]
 
-    if role_tokens:
-        role = " ".join(dict.fromkeys(role_tokens))
+    lowered = " ".join(tokens)
+    for phrase in _ROLE_PHRASES:
+        if phrase in lowered:
+            role = phrase
+            break
+    if role is None:
+        role_tokens = [token for token in tokens if token in _ROLE_HINTS]
+        if role_tokens:
+            role = " ".join(dict.fromkeys(role_tokens))
+
+    platform_tokens = [token for token in tokens if token in _PLATFORM_HINTS]
     if platform_tokens:
         media_platform = " ".join(dict.fromkeys(platform_tokens))
+    institutional_tokens = [token for token in tokens if token in _INSTITUTIONAL_HINTS]
     if institutional_tokens:
         institutional_hint = " ".join(dict.fromkeys(institutional_tokens))
 
-    phrase_match = re.match(
-        r"^(?P<left>.+?)\s+(?:in|en|de|from|at|for)\s+(?P<right>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,80})$",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    if phrase_match:
-        left = phrase_match.group("left").strip()
-        right = phrase_match.group("right").strip()
-        if left and right:
-            if role is None and any(token in _ROLE_HINTS for token in re.findall(r"[A-Za-zÀ-ÿ]+", left.casefold())):
-                role = left
-            elif organization is None:
-                organization = left
-            location = right
+    prep_loc = re.search(r"\b(?:in|en|from|based in|located in)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,80})$", normalized, flags=re.I)
+    if prep_loc:
+        location = prep_loc.group(1).strip()
+    elif tokens and tokens[-1] in _KNOWN_LOCATION_TOKENS:
+        location = words[-1]
+    elif any(token in _KNOWN_LOCATION_TOKENS for token in tokens):
+        idx = next(i for i, token in enumerate(tokens) if token in _KNOWN_LOCATION_TOKENS)
+        location = words[idx]
     elif "," in normalized:
         left, right = [part.strip() for part in normalized.split(",", 1)]
-        if left and right:
-            role = role or left
+        if right:
             location = right
+        if left and role is None:
+            role = left.casefold()
 
-    if location is None:
-        cap_tokens = re.findall(r"\b[A-ZÀ-Ý][a-zà-ÿ'-]{2,}\b", normalized)
-        if cap_tokens and len(cap_tokens) <= 3:
-            candidate = " ".join(cap_tokens)
-            lowered_parts = set(re.findall(r"[A-Za-zÀ-ÿ]+", candidate.casefold()))
-            if not lowered_parts & (_ROLE_HINTS | _PLATFORM_HINTS | _INSTITUTIONAL_HINTS):
-                location = candidate
+    org_match = re.search(r"\b(?:at|for|with|of)\s+([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&.\- ]{2,60})", normalized)
+    if org_match:
+        organization = org_match.group(1).strip()
 
-    if organization is None:
-        org_match = re.search(r"\b(?:at|for|of|de)\s+([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&.\- ]{2,60})", normalized)
-        if org_match:
-            organization = org_match.group(1).strip()
+    if organization is None and role and len(words) >= 2:
+        role_tokens = set(role.split())
+        role_positions = [idx for idx, token in enumerate(tokens) if token in role_tokens]
+        if role_positions:
+            first_role_idx = role_positions[0]
+            prefix = words[:first_role_idx]
+            if prefix and any(piece[:1].isupper() for piece in prefix):
+                organization = " ".join(prefix).strip()
+    if organization and location and organization.casefold() == location.casefold():
+        location = None
+
+    if role is None:
+        activity_tokens = [token for token in tokens if token in _ACTIVITY_HINTS]
+        if activity_tokens:
+            domain_activity = " ".join(dict.fromkeys(activity_tokens))
 
     generic_terms = tuple(
         token for token in dict.fromkeys(tokens) if token not in _STOP_TOKENS and token not in _LOCATION_PREPOSITIONS
     )
-    if normalized and len(tokens) <= 4 and not any(char.isdigit() for char in normalized):
-        domain_activity = normalized
+    if domain_activity is None and normalized and len(tokens) <= 4 and not any(char.isdigit() for char in normalized) and role is None:
+        filtered = [word for word in words if word.casefold() not in _KNOWN_LOCATION_TOKENS and word.casefold() not in _PLATFORM_HINTS]
+        if filtered:
+            domain_activity = " ".join(filtered).strip()
 
     return ContextQuery(
         role=role,

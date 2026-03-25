@@ -125,8 +125,25 @@ def test_parse_context_supports_public_creator_hints() -> None:
     parsed = _parse_context("Streamer Spain YouTube")
     assert parsed.role == "streamer"
     assert parsed.media_platform == "youtube"
-    assert parsed.domain_activity == "Streamer Spain YouTube"
+    assert parsed.location == "Spain"
+    assert parsed.domain_activity is None
     assert "streamer" in parsed.generic_terms
+
+
+def test_parse_context_disambiguates_role_org_location_activity() -> None:
+    microsoft = _parse_context("Microsoft CEO")
+    assert microsoft.role == "ceo"
+    assert microsoft.organization == "Microsoft"
+    assert microsoft.location is None
+
+    cyber = _parse_context("Cybersecurity Spain")
+    assert cyber.role is None
+    assert cyber.domain_activity == "cybersecurity"
+    assert cyber.location == "Spain"
+
+    engineer = _parse_context("Software Engineer Madrid")
+    assert engineer.role == "software engineer"
+    assert engineer.location == "Madrid"
 
 
 def test_query_variants_expand_beyond_professional_context() -> None:

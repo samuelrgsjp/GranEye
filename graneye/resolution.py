@@ -96,6 +96,34 @@ _LOW_AUTHORITY_BIO_HINTS = {
     "height",
     "wiki",
 }
+_NON_PERSON_TITLE_HINTS = {
+    "news",
+    "report",
+    "policy",
+    "privacy",
+    "terms",
+    "overview",
+    "conference",
+    "department",
+    "company",
+    "about us",
+    "investor",
+    "careers",
+    "events",
+    "announcement",
+}
+_ORG_PATH_HINTS = {
+    "about",
+    "company",
+    "research",
+    "department",
+    "investors",
+    "careers",
+    "privacy",
+    "terms",
+    "newsroom",
+}
+_PERSONISH_TOKENS = {"mr", "mrs", "ms", "dr", "prof", "ceo", "founder", "president"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -126,6 +154,8 @@ class ScoredCandidate:
     seo_penalty: float
     is_noise: bool
     reasons: tuple[str, ...]
+    query_validity: str = "valid"
+    score_cap_applied: float | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -197,6 +227,30 @@ def _context_overlap_score(context_value: str, haystack_tokens: set[str], *, lab
 
 def detect_entity_type(result: SearchResult) -> EntityType:
     """Classify result into public identity source categories."""
+    return detect_entity_type_with_reasons(result)[0]
+
+
+def _looks_like_person_slug(slug: str) -> bool:
+    parts = [part for part in re.split(r"[-_]", slug.casefold()) if part]
+    alpha_parts = [part for part in parts if any(char.isalpha() for char in part)]
+    if len(alpha_parts) < 2:
+        return False
+    return not any(part in _ARTICLE_HINTS | _ORG_PATH_HINTS for part in alpha_parts)
+
+
+def _looks_like_person_title(title: str) -> bool:
+    lowered = title.casefold()
+    if any(hint in lowered for hint in _NON_PERSON_TITLE_HINTS):
+        return False
+    tokens = [token for token in _normalized_tokens(title) if token]
+    alpha_tokens = [token for token in tokens if any(char.isalpha() for char in token)]
+    if len(alpha_tokens) >= 2:
+        return True
+    return any(token in _PERSONISH_TOKENS for token in alpha_tokens)
+
+
+def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, tuple[str, ...]]:
+    """Classify result and emit deterministic rationale for debug mode."""
 
     parsed = urlparse(result.url)
     domain = parsed.netloc.casefold().removeprefix("www.") or result.domain.casefold()
@@ -205,48 +259,60 @@ def detect_entity_type(result: SearchResult) -> EntityType:
     joined_text = _joined_text(result)
     tail_segment = path_segments[-1] if path_segments else ""
 
-    if is_directory_url(result.url) or any(token in domain for token in _DIRECTORY_HOST_HINTS):
-        return "directory"
-    if any(token in domain for token in _AGGREGATOR_HINTS):
-        return "aggregator"
+    reasons: list[str] = []
+    personish_tail = _looks_like_person_slug(tail_segment)
+    personish_title = _looks_like_person_title(result.title)
 
-    if any(segment in _ARTICLE_HINTS for segment in path_segments):
-        return "article"
+    if is_directory_url(result.url) or any(token in domain for token in _DIRECTORY_HOST_HINTS):
+        return "directory", ("directory_pattern",)
+    if any(token in domain for token in _AGGREGATOR_HINTS):
+        return "aggregator", ("aggregator_domain_pattern",)
+
+    if any(segment in _ARTICLE_HINTS for segment in path_segments) or any(hint in joined_text for hint in (" breaking ", "headline", "op-ed")):
+        return "article", ("article_path_or_title_pattern",)
 
     if any(domain.endswith(platform_domain) for platform_domain in _CREATOR_PLATFORM_DOMAINS):
         if any(segment in path_segments for segment in {"channel", "c", "user", "creator"}) or any(
             segment.startswith("@") for segment in path_segments
         ):
-            return "creator_profile"
-        return "media_profile"
+            return "creator_profile", ("creator_platform_path",)
+        return "media_profile", ("creator_platform_non_profile_page",)
 
     if any(domain.endswith(media_domain) for media_domain in _MEDIA_DOMAIN_HINTS):
-        return "media_profile"
+        return "media_profile", ("media_domain",)
 
     if len(path_segments) >= 2 and path_segments[-2] in _PROFILE_SEGMENTS:
-        return "person_profile"
+        if personish_tail and personish_title:
+            return "person_profile", ("profile_segment_with_personish_slug_and_title",)
+        return "unknown", ("profile_segment_without_person_plausibility",)
 
     if any(hint in domain for hint in _ACADEMIC_DOMAIN_HINTS) or any(
         segment in path_segments for segment in {"faculty", "research", "department", "academics", "professor"}
     ):
         if any(segment in path_segments for segment in {"faculty", "professor", "staff"}):
-            return "academic_profile"
-        return "institutional_profile"
+            return "academic_profile", ("academic_domain_or_path",)
+        return "institutional_profile", ("institutional_academic_path",)
 
     if len(path_segments) >= 2 and path_segments[-2] in _OFFICIAL_PROFILE_SEGMENTS:
-        if re.search(r"[-_]", tail_segment):
-            return "official_profile"
+        if personish_tail and (re.search(r"[-_]", tail_segment) or personish_title):
+            return "official_profile", ("official_segment_with_personish_slug",)
         if any(token in joined_text for token in ("professor", "attorney", "psychologist", "md", "phd", "chief", "ceo")):
-            return "official_profile"
-        return "institutional_profile"
+            return "official_profile", ("official_segment_with_role_tokens",)
+        return "institutional_profile", ("official_segment_without_person_signals",)
 
     if any(segment in _COMPANY_HINTS for segment in path_segments):
-        return "official_bio"
+        if personish_tail or personish_title:
+            return "official_bio", ("company_path_with_person_signals",)
+        return "institutional_profile", ("company_path_without_person_signals",)
+    if any(segment in _ORG_PATH_HINTS for segment in path_segments):
+        return "institutional_profile", ("organization_path_pattern",)
 
     if re.search(r"\b(profile|bio|about\s+me|executive\s+profile|faculty|attorney|psychologist)\b", joined_text):
-        return "person_profile"
+        if personish_title:
+            return "person_profile", ("profile_or_bio_text_with_person_title",)
+        reasons.append("profile_text_without_person_title")
 
-    return "unknown"
+    return "unknown", tuple(reasons or ["no_strong_entity_pattern"])
 
 
 def detect_name_match_quality(query_name: str, result: SearchResult) -> NameMatchQuality:
@@ -402,7 +468,7 @@ def detect_source_authority(result: SearchResult) -> tuple[SourceAuthorityTier, 
     return "public_structured_profile", 0.02, ["default_public_profile_assumption"]
 
 
-def _seo_bio_penalty(result: SearchResult) -> tuple[float, list[str]]:
+def _seo_bio_penalty(result: SearchResult, authority_tier: SourceAuthorityTier) -> tuple[float, list[str]]:
     text = _joined_text(result)
     penalty = 0.0
     reasons: list[str] = []
@@ -427,37 +493,48 @@ def _seo_bio_penalty(result: SearchResult) -> tuple[float, list[str]]:
     if detect_entity_type(result) in {"article", "unknown"} and "biography" in text and result.domain.count(".") >= 1:
         penalty += 0.06
         reasons.append("generic_biography_page_penalty")
+    if authority_tier in {"strong_encyclopedic", "official_institutional"}:
+        adjusted = penalty * 0.2
+        if penalty > 0:
+            reasons.append("authority_conditioned_seo_penalty_reduction")
+        penalty = adjusted
     return min(0.3, penalty), reasons
 
 
-def score_candidate(result: SearchResult, query_name: str, context: ContextQuery) -> ScoredCandidate:
+def score_candidate(
+    result: SearchResult,
+    query_name: str,
+    context: ContextQuery,
+    query_validity: QueryValidityAssessment,
+) -> ScoredCandidate:
     """Deterministic scoring with explicit bonuses/penalties for explainability."""
 
     reasons: list[str] = []
-    entity_type = detect_entity_type(result)
+    entity_type, entity_rationale = detect_entity_type_with_reasons(result)
     name_match = detect_name_match_quality(query_name, result)
     context_strength, context_reasons = context_match_strength(result, context)
     authority_tier, authority_weight, authority_reasons = detect_source_authority(result)
-    seo_penalty, seo_reasons = _seo_bio_penalty(result)
+    seo_penalty, seo_reasons = _seo_bio_penalty(result, authority_tier)
     noisy = is_noise_result(result)
 
     score = 0.0
 
     entity_weights: dict[EntityType, float] = {
-        "person_profile": 0.35,
-        "official_profile": 0.33,
-        "official_bio": 0.24,
-        "academic_profile": 0.3,
-        "institutional_profile": 0.2,
+        "person_profile": 0.31,
+        "official_profile": 0.4,
+        "official_bio": 0.3,
+        "academic_profile": 0.34,
+        "institutional_profile": 0.24,
         "media_profile": 0.22,
         "creator_profile": 0.24,
-        "article": 0.05,
+        "article": -0.02,
         "directory": -0.25,
         "aggregator": -0.2,
         "unknown": 0.0,
     }
     score += entity_weights[entity_type]
     reasons.append(f"entity:{entity_type}")
+    reasons.extend(f"entity_rationale:{signal}" for signal in entity_rationale[:3])
 
     name_weights: dict[NameMatchQuality, float] = {
         "full_match": 0.34,
@@ -528,6 +605,16 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     if entity_type == "article" and has_context_constraints and context_strength < 0.22:
         score -= 0.12
         reasons.append("article_low_context_penalty")
+    if entity_type == "article" and authority_tier not in {"strong_encyclopedic", "official_institutional"}:
+        score -= 0.08
+        reasons.append("generic_article_source_priority_penalty")
+    if (
+        has_context_constraints
+        and entity_type in {"official_profile", "official_bio", "institutional_profile", "academic_profile"}
+        and authority_tier in {"official_institutional", "strong_encyclopedic", "public_structured_profile"}
+    ):
+        score += 0.08
+        reasons.append("source_priority_boost:structured_or_official")
 
     if noisy:
         score -= 0.35
@@ -539,6 +626,17 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     if result.domain.endswith("wikipedia.org") and context_strength < 0.15:
         score -= 0.08
         reasons.append("wikipedia_weak_context_penalty")
+    score_cap_applied: float | None = None
+    query_score_caps = {
+        "too_short": 0.42,
+        "numeric_or_garbage": 0.28,
+        "too_generic": 0.48,
+        "non_person_like": 0.4,
+    }
+    if query_validity.status in query_score_caps:
+        score_cap_applied = query_score_caps[query_validity.status]
+        score = min(score, score_cap_applied)
+        reasons.append(f"query_invalid_score_cap:{query_validity.status}:{score_cap_applied:.2f}")
 
     return ScoredCandidate(
         result=result,
@@ -549,6 +647,8 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
         authority_tier=authority_tier,
         seo_penalty=seo_penalty,
         is_noise=noisy,
+        query_validity=query_validity.status,
+        score_cap_applied=score_cap_applied,
         reasons=tuple(reasons),
     )
 
@@ -684,7 +784,8 @@ def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None
 def rank_candidates(results: Iterable[SearchResult], query_name: str, context: ContextQuery) -> list[ScoredCandidate]:
     """Rank all candidates deterministically using evidence-driven heuristics."""
 
-    scored = [score_candidate(result, query_name, context) for result in results]
+    query_validity = assess_query_validity(query_name)
+    scored = [score_candidate(result, query_name, context, query_validity) for result in results]
     return sorted(scored, key=lambda item: (-item.score, item.result.domain, item.result.url))
 
 
@@ -800,7 +901,8 @@ def resolve_identity(
     explanation = (
         f"{prefix}Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
         f"authority={top.authority_tier}; seo_penalty={top.seo_penalty:.2f}; "
-        f"query_validity={query_validity.status}; signals: {', '.join(top.reasons[:6])}; "
+        f"query_validity={query_validity.status}; score_cap={top.score_cap_applied if top.score_cap_applied is not None else 'none'}; "
+        f"signals: {', '.join(top.reasons[:8])}; "
         f"path={resolution_path}; fetch={fetch_status}; score_gap={score_gap:.3f}; "
         f"evidence={evidence_strength:.3f}; confidence={confidence_label}"
     )
