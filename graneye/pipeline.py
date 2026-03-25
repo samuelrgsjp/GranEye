@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable, Mapping
 import re
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .analyzers.base import Analyzer
 from .clustering import cluster_identities
@@ -26,6 +27,9 @@ class SearchPipelineDiagnostics:
     filter_decisions: tuple[FilterDecision, ...]
     ranked_candidates: tuple[ScoredCandidate, ...]
     query_attempts: tuple[str, ...] = ()
+    source_diversity_count: int = 0
+    ambiguity_triggered: bool = False
+    ambiguity_reason: str = ""
 
 
 def analyze_records(
@@ -78,14 +82,20 @@ def _context_parts(context: str | None) -> tuple[str | None, str | None]:
 def _query_variants(target_name: str, context: str | None) -> list[str]:
     base = target_name.strip()
     if not context:
-        return [base]
+        return [base, f"\"{base}\"", f"{base} profile", f"{base} biography"]
     context_clean = context.strip()
     if not context_clean:
         return [base]
     variants = [
         f"{base} {context_clean}",
         f"\"{base}\" {context_clean}",
+        f"{base} {context_clean} profile",
+        f"{base} {context_clean} biography",
+        f"\"{base}\" {context_clean} site:.edu",
+        f"{base} {context_clean} linkedin",
         base,
+        f"\"{base}\"",
+        f"{base} profile",
     ]
     seen: set[str] = set()
     ordered: list[str] = []
@@ -105,6 +115,7 @@ def _run_search(
 ) -> tuple[list[Mapping[str, str]], tuple[str, ...]]:
     combined_results: list[Mapping[str, str]] = []
     seen_urls: set[str] = set()
+    seen_signatures: set[tuple[str, str]] = set()
     attempted_queries: list[str] = []
     for query_text in query_texts:
         attempted_queries.append(query_text)
@@ -117,16 +128,54 @@ def _run_search(
         except Exception:
             instant_results = []
 
-        for item in [*raw_results, *instant_results]:
+        merged_sources = [*raw_results, *instant_results]
+        if len(merged_sources) <= 1 and " " in query_text:
+            # Name-only fallback for weak one-result query outcomes.
+            quoted = re.findall(r'"([^"]+)"', query_text)
+            if quoted:
+                name_only = quoted[0].strip()
+            else:
+                tokens = query_text.split()
+                name_only = " ".join(tokens[:2]).strip()
+            if len(name_only) >= 3:
+                try:
+                    merged_sources.extend(html_search(name_only))
+                except Exception:
+                    pass
+
+        for item in merged_sources:
             url = str(item.get("url") or item.get("link")).strip()
-            if url and url in seen_urls:
+            canonical_url = _canonicalize_url(url)
+            title_signature = " ".join(str(item.get("title") or "").casefold().split())
+            signature = (title_signature, urlparse(canonical_url).netloc.casefold())
+            if canonical_url and canonical_url in seen_urls:
                 continue
-            if url:
-                seen_urls.add(url)
+            if signature in seen_signatures:
+                continue
+            if canonical_url:
+                seen_urls.add(canonical_url)
+            if signature != ("", ""):
+                seen_signatures.add(signature)
             combined_results.append(item)
-        if len(combined_results) >= 8:
+        if len(combined_results) >= 12:
             break
     return combined_results, tuple(attempted_queries)
+
+
+def _canonicalize_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip()
+    query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not k.lower().startswith("utm_")]
+    cleaned = parsed._replace(
+        netloc=parsed.netloc.casefold().removeprefix("www."),
+        query=urlencode(query_pairs, doseq=True),
+        fragment="",
+        path=parsed.path.rstrip("/") or "/",
+    )
+    return urlunparse(cleaned)
 
 
 def resolve_query(
@@ -206,5 +255,8 @@ def resolve_query_with_debug(
         filter_decisions=tuple(filter_decisions),
         ranked_candidates=tuple(ranked),
         query_attempts=query_attempts,
+        source_diversity_count=len({item.result.domain for item in ranked}),
+        ambiguity_triggered=bool(resolved and resolved.ambiguity_detected),
+        ambiguity_reason=resolved.ambiguity_reason or "" if resolved else "",
     )
     return resolved, ranked, diagnostics
