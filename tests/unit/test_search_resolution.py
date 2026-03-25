@@ -852,6 +852,56 @@ def test_official_first_party_bio_outranks_media_for_identity_resolution() -> No
     assert any("first_party_exact_name_org_priority" in reason for reason in ranked[0].reasons)
 
 
+def test_jensen_founder_ceo_prefers_official_over_wikipedia_and_media() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang keynote recap",
+                    "url": "https://news.example.com/article/jensen-huang-keynote",
+                    "snippet": "Media recap mentioning NVIDIA founder and CEO Jensen Huang.",
+                },
+                {
+                    "title": "Jensen Huang - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+                    "snippet": "Co-founder and CEO of Nvidia.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official biography.",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="founder ceo", organization="NVIDIA"),
+    )
+    assert ranked[0].result.url == "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/"
+
+
+def test_official_boost_activates_with_domain_and_path_even_without_org_snippet_substring() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - Leadership",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/jensen-huang/",
+                    "snippet": "Founder, President and CEO.",
+                },
+                {
+                    "title": "Jensen Huang profile article",
+                    "url": "https://www.reuters.com/world/us/jensen-huang-profile-2026-01-01/",
+                    "snippet": "Profile article about the executive.",
+                },
+            ]
+        ),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    assert ranked[0].result.domain == "nvidia.com"
+    assert any(reason.startswith("pool_adjustment:+") for reason in ranked[0].reasons)
+
+
 def test_common_name_researchgate_only_profile_stays_no_resolution() -> None:
     output = resolve_identity(
         "María López",
@@ -872,6 +922,30 @@ def test_common_name_researchgate_only_profile_stays_no_resolution() -> None:
     assert output.no_resolution_reason == "common_name_structured_profile_without_corroboration"
 
 
+def test_common_name_official_like_candidate_without_specific_support_stays_no_resolution() -> None:
+    output = resolve_identity(
+        "Carlos Pérez",
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez - Cybersecurity speaker",
+                    "url": "https://securitynews.example.com/article/carlos-perez-panel",
+                    "snippet": "Cybersecurity panel in Spain.",
+                },
+                {
+                    "title": "Carlos Pérez - Team",
+                    "url": "https://examplecorp.com/team/carlos-perez",
+                    "snippet": "Technology team profile.",
+                },
+            ]
+        ),
+        role="Cybersecurity",
+        location="Spain",
+    )
+    assert output is not None
+    assert output.no_resolution is True
+
+
 def test_single_wikipedia_result_does_not_get_high_confidence() -> None:
     output = resolve_identity(
         "Taylor Swift",
@@ -889,6 +963,34 @@ def test_single_wikipedia_result_does_not_get_high_confidence() -> None:
     )
     assert output is not None
     assert output.confidence_label != "high"
+
+
+def test_jensen_ranking_is_deterministic_under_permutations_and_repeated_runs() -> None:
+    raw = [
+        {
+            "title": "Jensen Huang - Wikipedia",
+            "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+            "snippet": "Co-founder and CEO of Nvidia.",
+        },
+        {
+            "title": "Jensen Huang - Founder and CEO",
+            "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+            "snippet": "Official NVIDIA biography.",
+        },
+        {
+            "title": "Jensen Huang interview",
+            "url": "https://news.example.com/article/jensen-huang-interview",
+            "snippet": "Interview with NVIDIA CEO.",
+        },
+    ]
+    ranked_a = rank_candidates(enrich_search_results(raw), "Jensen Huang", ContextQuery(role="CEO", organization="NVIDIA"))
+    ranked_b = rank_candidates(
+        enrich_search_results([raw[2], raw[0], raw[1]]),
+        "Jensen Huang",
+        ContextQuery(role="CEO", organization="NVIDIA"),
+    )
+    ranked_c = rank_candidates(enrich_search_results(raw), "Jensen Huang", ContextQuery(role="CEO", organization="NVIDIA"))
+    assert ranked_a[0].result.url == ranked_b[0].result.url == ranked_c[0].result.url
 
 
 @pytest.mark.parametrize(
