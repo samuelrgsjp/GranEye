@@ -1192,3 +1192,26 @@ def test_mrbeast_single_token_identity_gets_stronger_canonical_quality() -> None
     match = re.search(r"canonical_name_quality=([0-9.]+)", output.explanation)
     assert match is not None
     assert float(match.group(1)) >= 0.7
+
+
+def test_mrbeast_public_identity_fallback_avoids_weak_canonical_quality() -> None:
+    output = resolve_identity(
+        "MrBeast",
+        enrich_search_results(
+            [
+                {
+                    "title": "MrBeast - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/MrBeast",
+                    "snippet": "MrBeast is an American YouTuber and philanthropist.",
+                }
+            ]
+        ),
+        media_platform="youtube",
+        fetcher=lambda _url: "",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.normalized_candidate_name == "mrbeast"
+    match = re.search(r"canonical_name_quality=([0-9.]+)", output.explanation)
+    assert match is not None
+    assert float(match.group(1)) >= 0.6
