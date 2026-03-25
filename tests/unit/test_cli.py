@@ -482,6 +482,21 @@ def test_invalid_query_reports_no_resolution_in_human_and_json(
     assert payload["resolution_status"] == "no-resolution"
 
 
+def test_invalid_query_cannot_be_reported_as_resolved_even_if_resolver_returns_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+
+    code = cli.main(["a", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert payload["query_validity"] == "too_short"
+    assert payload["resolution_status"] == "no-resolution"
+    assert payload["no_resolution_reason"] == "invalid_query:too_short"
+
+
 def test_repeated_serialization_of_same_final_output_is_stable() -> None:
     finalized = cli.FinalizedQueryResult(
         target_name="Laura Gómez Martínez",
@@ -691,6 +706,13 @@ def test_single_mode_rejects_jsonl_flag(capsys: pytest.CaptureFixture[str]) -> N
     captured = capsys.readouterr()
     assert code == 3
     assert "--jsonl is for batch mode only" in captured.err
+
+
+def test_main_rejects_json_and_jsonl_together(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["Laura Gómez Martínez", "--json", "--jsonl"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "use either --json or --jsonl" in captured.err
 
 
 def test_batch_file_read_failure_returns_cli_error(capsys: pytest.CaptureFixture[str]) -> None:

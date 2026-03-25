@@ -187,8 +187,6 @@ def _build_final_output(
     resolved: ResolutionOutput | None,
     ranked: list[ScoredCandidate],
 ) -> ResolutionOutput:
-    if resolved is not None:
-        return resolved
     if query_validity != "valid":
         return ResolutionOutput(
             normalized_candidate_name="",
@@ -210,6 +208,8 @@ def _build_final_output(
             no_resolution=True,
             no_resolution_reason=f"invalid_query:{query_validity}",
         )
+    if resolved is not None:
+        return resolved
     if not ranked:
         return ResolutionOutput(
             normalized_candidate_name="",
