@@ -21,6 +21,9 @@ from graneye.search import SearchResult, enrich_search_results
         ("https://example.com/directory/people", "directory"),
         ("https://example.com/company/acme", "company_page"),
         ("https://example.com/news/jane-doe-award", "article"),
+        ("https://university.example.edu/faculty/ana-ruiz-lopez", "person_profile"),
+        ("https://lawfirm.example.com/attorneys/francois-dupont", "person_profile"),
+        ("https://corp.example.com/leadership/hans-muller", "person_profile"),
     ],
 )
 def test_entity_type_detection(url: str, expected_type: str) -> None:
@@ -226,6 +229,49 @@ def test_context_aligned_company_page_can_beat_low_context_linkedin() -> None:
         ContextQuery(profession="Platform Engineering Director", location="London"),
     )
     assert ranked[0].result.url == "https://exampleai.com/company/leadership/john-smith"
+
+
+def test_low_confidence_when_only_weak_generic_results_exist() -> None:
+    output = resolve_identity(
+        "John Smith",
+        enrich_search_results(
+            [
+                {
+                    "title": "John Smith - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/John_Smith",
+                    "snippet": "John Smith may refer to many people",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.ambiguity_detected is True
+    assert output.confidence_label == "low"
+
+
+def test_ambiguous_common_name_sets_multiple_plausible_reason() -> None:
+    output = resolve_identity(
+        "John Smith",
+        enrich_search_results(
+            [
+                {
+                    "title": "John Smith | Software Engineer",
+                    "url": "https://londondev.example.com/in/john-smith",
+                    "snippet": "Software engineer in London",
+                },
+                {
+                    "title": "John Smith | Backend Engineer",
+                    "url": "https://ukcoder.example.com/in/john-smith",
+                    "snippet": "Backend engineer based in London",
+                },
+            ]
+        ),
+        profession="Software Engineer",
+        location="London",
+    )
+    assert output is not None
+    assert output.ambiguity_detected is True
+    assert output.ambiguity_reason == "multiple_plausible_candidates"
 
 
 @pytest.mark.parametrize(

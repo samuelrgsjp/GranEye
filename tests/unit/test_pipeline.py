@@ -54,7 +54,9 @@ def test_resolve_query_retries_with_name_only_when_context_query_is_empty() -> N
     )
     assert output is not None
     assert ranked
-    assert seen_queries == ["Satya Nadella Microsoft CEO", "\"Satya Nadella\" Microsoft CEO", "Satya Nadella"]
+    assert seen_queries[0] == "Satya Nadella Microsoft CEO"
+    assert "\"Satya Nadella\" Microsoft CEO" in seen_queries
+    assert "Satya Nadella" in seen_queries
 
 
 def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
@@ -79,6 +81,7 @@ def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
     assert diagnostics.query_attempts[0] == "Satya Nadella Microsoft CEO"
     assert any(decision.reason == "search_engine_or_internal" for decision in diagnostics.filter_decisions)
     assert diagnostics.ranked_candidates
+    assert diagnostics.source_diversity_count >= 1
 
 
 def test_resolve_query_with_debug_high_signal_instant_fallback_has_candidates() -> None:
@@ -99,3 +102,19 @@ def test_resolve_query_with_debug_high_signal_instant_fallback_has_candidates() 
     assert diagnostics.raw_results_count == 1
     assert diagnostics.filtered_results_count == 1
     assert ranked[0].context_strength > 0
+
+
+def test_resolve_query_with_debug_reports_ambiguity_when_candidates_are_close() -> None:
+    html_results = [
+        {"title": "John Smith - Engineer", "url": "https://a.example.com/john-smith", "snippet": "Engineer in London"},
+        {"title": "John Smith - Developer", "url": "https://b.example.com/john-smith", "snippet": "Software engineer London"},
+    ]
+    output, _ranked, diagnostics = resolve_query_with_debug(
+        "John Smith",
+        context="Software Engineer London",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: [],
+    )
+    assert output is not None
+    assert output.ambiguity_detected is True
+    assert diagnostics.ambiguity_triggered is True

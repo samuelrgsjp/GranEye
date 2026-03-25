@@ -50,6 +50,9 @@ def _render_output(target_name: str, target_context: str | None, output: Resolut
         f"Score: {output.final_score:.3f}",
         f"Same-person probability: {output.same_person_probability:.3f}",
         f"Context match probability: {output.context_match_probability:.3f}",
+        f"Confidence: {output.confidence_label}",
+        f"Ambiguity detected: {'yes' if output.ambiguity_detected else 'no'}",
+        f"Ambiguity reason: {output.ambiguity_reason or '(none)'}",
         f"Resolution path: {output.resolution_path}",
         f"Fetch status: {output.fetch_status}",
         f"Decision reason: {output.explanation}",
@@ -121,6 +124,9 @@ def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
         f"Normalized results count: {diagnostics.normalized_results_count}",
         f"Filtered results count: {diagnostics.filtered_results_count}",
         f"Ranked candidates count: {diagnostics.ranked_candidates_count}",
+        f"Source diversity (domains): {diagnostics.source_diversity_count}",
+        f"Ambiguity triggered: {'yes' if diagnostics.ambiguity_triggered else 'no'}",
+        f"Ambiguity reason: {diagnostics.ambiguity_reason or '(none)'}",
         "Discarded candidates:",
     ]
     discarded = [decision for decision in diagnostics.filter_decisions if not decision.accepted]

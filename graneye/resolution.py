@@ -19,6 +19,21 @@ _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "w
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
+_OFFICIAL_PROFILE_SEGMENTS = {
+    "leadership",
+    "executive",
+    "management",
+    "faculty",
+    "staff",
+    "team",
+    "professionals",
+    "attorneys",
+    "lawyers",
+    "doctors",
+    "psychologists",
+    "bio",
+    "biography",
+}
 _CONTEXT_STOPWORDS = {"the", "a", "an", "at", "in", "de", "del", "la", "el", "of", "and"}
 _HIGH_SIGNAL_DOMAINS = {"wikipedia.org", "microsoft.com", "google.com", "nvidia.com", "github.com"}
 _NETWORK_PROFILE_DOMAINS = {"linkedin.com", "x.com", "twitter.com", "facebook.com", "instagram.com"}
@@ -72,6 +87,9 @@ class ResolutionOutput:
     explanation: str
     resolution_path: Literal["full_content", "partial_content", "search_only", "fetch_blocked"] = "search_only"
     fetch_status: str = "not_attempted"
+    confidence_label: Literal["high", "medium", "low"] = "medium"
+    ambiguity_detected: bool = False
+    ambiguity_reason: str | None = None
 
 
 def _normalized_tokens(value: str) -> list[str]:
@@ -109,19 +127,29 @@ def detect_entity_type(result: SearchResult) -> EntityType:
     parsed = urlparse(result.url)
     path_segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
 
+    joined_text = _joined_text(result)
+    tail_segment = path_segments[-1] if path_segments else ""
+
     if is_directory_url(result.url) or any(token in result.domain for token in _DIRECTORY_HOST_HINTS):
         return "directory"
 
     if any(segment in _ARTICLE_HINTS for segment in path_segments):
         return "article"
 
-    if any(segment in _COMPANY_HINTS for segment in path_segments):
-        return "company_page"
-
     if len(path_segments) >= 2 and path_segments[-2] in _PROFILE_SEGMENTS:
         return "person_profile"
 
-    if re.search(r"\b(profile|bio|about\s+me)\b", _joined_text(result)):
+    if len(path_segments) >= 2 and path_segments[-2] in _OFFICIAL_PROFILE_SEGMENTS:
+        if re.search(r"[-_]", tail_segment):
+            return "person_profile"
+        if any(token in joined_text for token in ("professor", "attorney", "psychologist", "md", "phd", "chief", "ceo")):
+            return "person_profile"
+        return "company_page"
+
+    if any(segment in _COMPANY_HINTS for segment in path_segments):
+        return "company_page"
+
+    if re.search(r"\b(profile|bio|about\s+me|executive\s+profile|faculty|attorney|psychologist)\b", joined_text):
         return "person_profile"
 
     return "unknown"
@@ -443,6 +471,7 @@ def resolve_identity(
         return None
 
     top = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
     content, fetch_status = extract_top_candidate_content(top.result.url, fetcher=fetcher)
     normalized_name, role, organization, inferred_location = infer_profile_signals(content)
 
@@ -459,9 +488,23 @@ def resolve_identity(
     else:
         resolution_path = "search_only"
 
+    score_gap = top.score - second.score if second else 1.0
+    low_evidence = top.score < 0.4 or top.name_match == "weak_match" or top.entity_type in {"unknown", "article"}
+    close_competition = second is not None and score_gap < 0.08 and second.score > 0.33
+    ambiguity_detected = low_evidence or close_competition
+    ambiguity_reason = None
+    confidence_label: Literal["high", "medium", "low"] = "high"
+    if ambiguity_detected:
+        confidence_label = "low"
+        ambiguity_reason = "weak_evidence" if low_evidence else "multiple_plausible_candidates"
+    elif top.score < 0.62 or (second is not None and score_gap < 0.16):
+        confidence_label = "medium"
+
+    prefix = "AMBIGUOUS: " if ambiguity_detected else ""
     explanation = (
-        f"Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
-        f"signals: {', '.join(top.reasons[:5])}; path={resolution_path}; fetch={fetch_status}"
+        f"{prefix}Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
+        f"signals: {', '.join(top.reasons[:5])}; path={resolution_path}; fetch={fetch_status}; "
+        f"score_gap={score_gap:.3f}; confidence={confidence_label}"
     )
 
     return ResolutionOutput(
@@ -477,4 +520,7 @@ def resolve_identity(
         resolution_path=resolution_path,
         fetch_status=fetch_status,
         explanation=explanation,
+        confidence_label=confidence_label,
+        ambiguity_detected=ambiguity_detected,
+        ambiguity_reason=ambiguity_reason,
     )
