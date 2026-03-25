@@ -227,3 +227,40 @@ def test_resolve_query_with_debug_marks_invalid_short_query() -> None:
     assert ranked
     assert diagnostics.query_validity == "too_short"
     assert output.confidence_label == "low"
+
+
+def test_debug_and_non_debug_paths_share_same_semantic_resolution() -> None:
+    html_results = [
+        {
+            "title": "Jensen Huang - NVIDIA Leadership",
+            "url": "https://www.nvidia.com/en-us/about-nvidia/leadership/",
+            "snippet": "Founder, President and CEO of NVIDIA",
+        },
+        {
+            "title": "Jensen Huang - Wikipedia",
+            "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+            "snippet": "Taiwanese-American billionaire businessman",
+        },
+    ]
+
+    output, ranked = resolve_query(
+        "Jensen Huang",
+        context="NVIDIA CEO",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: [],
+    )
+    debug_output, debug_ranked, _diagnostics = resolve_query_with_debug(
+        "Jensen Huang",
+        context="NVIDIA CEO",
+        html_search=lambda _q: html_results,
+        instant_search=lambda _q: [],
+    )
+
+    assert output is not None
+    assert debug_output is not None
+    assert output.no_resolution == debug_output.no_resolution
+    assert output.ambiguity_detected == debug_output.ambiguity_detected
+    assert output.source_url == debug_output.source_url
+    assert output.normalized_candidate_name == debug_output.normalized_candidate_name
+    assert output.confidence_label == debug_output.confidence_label
+    assert [item.result.url for item in ranked] == [item.result.url for item in debug_ranked]

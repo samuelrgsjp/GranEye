@@ -124,9 +124,10 @@ def test_main_falls_back_to_search_only_when_resolution_missing(
     code = cli.main(["Laura Gómez Martínez"])
     captured = capsys.readouterr()
 
-    assert code == 0
-    assert "Status: resolved" in captured.out
+    assert code == 2
+    assert "Status: no-resolution" in captured.out
     assert "Top candidate:" in captured.out
+    assert "Reason: search_only_unverified_candidate" in captured.out
 
 
 def test_main_no_candidates_status_consistent_between_human_and_json(
@@ -435,6 +436,20 @@ def test_repeated_serialization_of_same_final_output_is_stable() -> None:
     second = cli._json_payload(finalized)
     assert first == second
     assert first["resolution_status"] == "resolved"
+
+
+def test_repeated_identical_json_runs_are_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+    outputs: list[str] = []
+    for _ in range(3):
+        code = cli.main(["Jensen Huang", "NVIDIA CEO", "--json"])
+        captured = capsys.readouterr()
+        assert code == 0
+        outputs.append(captured.out.strip())
+    assert outputs[0] == outputs[1] == outputs[2]
 
 
 def test_human_and_json_share_status_for_ambiguous_case(

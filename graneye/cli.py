@@ -223,11 +223,10 @@ def _build_final_output(
             no_resolution_reason="no_candidates",
         )
 
-    # Intentional fallback path:
-    # If ranking produced candidates but page-level resolution did not complete
-    # (for example due to fetch blocking), return a search-only low-confidence
-    # output so callers can still inspect the strongest ranked candidate.
-    # This is not page-validated identity resolution.
+    # Conservative fallback path:
+    # If ranking produced candidates but identity resolution did not complete,
+    # expose the strongest search candidate as evidence while preserving a
+    # no-resolution status to avoid semantic fabrication.
     top = ranked[0]
     return ResolutionOutput(
         normalized_candidate_name=top.result.title or top.result.domain,
@@ -246,8 +245,8 @@ def _build_final_output(
         confidence_label="low",
         ambiguity_detected=False,
         ambiguity_reason=None,
-        no_resolution=False,
-        no_resolution_reason=None,
+        no_resolution=True,
+        no_resolution_reason="search_only_unverified_candidate",
     )
 
 
