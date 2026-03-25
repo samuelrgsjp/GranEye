@@ -12,11 +12,23 @@ from .detection import is_directory_url
 from .normalization import normalize_name
 from .search import SearchResult
 
-EntityType = Literal["person_profile", "directory", "company_page", "article", "unknown"]
+EntityType = Literal[
+    "person_profile",
+    "official_profile",
+    "official_bio",
+    "academic_profile",
+    "institutional_profile",
+    "media_profile",
+    "creator_profile",
+    "article",
+    "directory",
+    "aggregator",
+    "unknown",
+]
 NameMatchQuality = Literal["full_match", "reordered_match", "partial_match", "weak_match"]
 
 _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages"}
-_COMPANY_HINTS = {"about", "company", "team", "leadership", "careers"}
+_COMPANY_HINTS = {"about", "company", "team", "leadership", "careers", "executive", "management"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
 _OFFICIAL_PROFILE_SEGMENTS = {
@@ -37,14 +49,24 @@ _OFFICIAL_PROFILE_SEGMENTS = {
 _CONTEXT_STOPWORDS = {"the", "a", "an", "at", "in", "de", "del", "la", "el", "of", "and"}
 _HIGH_SIGNAL_DOMAINS = {"wikipedia.org", "microsoft.com", "google.com", "nvidia.com", "github.com"}
 _NETWORK_PROFILE_DOMAINS = {"linkedin.com", "x.com", "twitter.com", "facebook.com", "instagram.com"}
+_ACADEMIC_DOMAIN_HINTS = {".edu", ".ac.", ".edu."}
+_MEDIA_DOMAIN_HINTS = {"imdb.com", "filmaffinity.com", "tmdb.org", "variety.com", "rollingstone.com"}
+_CREATOR_PLATFORM_DOMAINS = {"youtube.com", "twitch.tv", "tiktok.com", "patreon.com", "soundcloud.com", "substack.com"}
+_AGGREGATOR_HINTS = {"fandom", "wikidata", "wikia", "allfamous", "famousbirthdays"}
 
 
 @dataclass(slots=True, frozen=True)
 class ContextQuery:
     """Optional context to disambiguate person identity resolution."""
 
-    profession: str | None = None
+    role: str | None = None
+    organization: str | None = None
     location: str | None = None
+    domain_activity: str | None = None
+    media_platform: str | None = None
+    institutional_hint: str | None = None
+    raw_context: str | None = None
+    generic_terms: tuple[str, ...] = ()
     expected_domains: tuple[str, ...] = ()
 
 
@@ -122,32 +144,52 @@ def _context_overlap_score(context_value: str, haystack_tokens: set[str], *, lab
 
 
 def detect_entity_type(result: SearchResult) -> EntityType:
-    """Classify result as profile/directory/company/article/unknown."""
+    """Classify result into public identity source categories."""
 
     parsed = urlparse(result.url)
+    domain = parsed.netloc.casefold().removeprefix("www.") or result.domain.casefold()
     path_segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
 
     joined_text = _joined_text(result)
     tail_segment = path_segments[-1] if path_segments else ""
 
-    if is_directory_url(result.url) or any(token in result.domain for token in _DIRECTORY_HOST_HINTS):
+    if is_directory_url(result.url) or any(token in domain for token in _DIRECTORY_HOST_HINTS):
         return "directory"
+    if any(token in domain for token in _AGGREGATOR_HINTS):
+        return "aggregator"
 
     if any(segment in _ARTICLE_HINTS for segment in path_segments):
         return "article"
 
+    if any(domain.endswith(platform_domain) for platform_domain in _CREATOR_PLATFORM_DOMAINS):
+        if any(segment in path_segments for segment in {"channel", "c", "user", "creator"}) or any(
+            segment.startswith("@") for segment in path_segments
+        ):
+            return "creator_profile"
+        return "media_profile"
+
+    if any(domain.endswith(media_domain) for media_domain in _MEDIA_DOMAIN_HINTS):
+        return "media_profile"
+
     if len(path_segments) >= 2 and path_segments[-2] in _PROFILE_SEGMENTS:
         return "person_profile"
 
+    if any(hint in domain for hint in _ACADEMIC_DOMAIN_HINTS) or any(
+        segment in path_segments for segment in {"faculty", "research", "department", "academics", "professor"}
+    ):
+        if any(segment in path_segments for segment in {"faculty", "professor", "staff"}):
+            return "academic_profile"
+        return "institutional_profile"
+
     if len(path_segments) >= 2 and path_segments[-2] in _OFFICIAL_PROFILE_SEGMENTS:
         if re.search(r"[-_]", tail_segment):
-            return "person_profile"
+            return "official_profile"
         if any(token in joined_text for token in ("professor", "attorney", "psychologist", "md", "phd", "chief", "ceo")):
-            return "person_profile"
-        return "company_page"
+            return "official_profile"
+        return "institutional_profile"
 
     if any(segment in _COMPANY_HINTS for segment in path_segments):
-        return "company_page"
+        return "official_bio"
 
     if re.search(r"\b(profile|bio|about\s+me|executive\s+profile|faculty|attorney|psychologist)\b", joined_text):
         return "person_profile"
@@ -186,7 +228,7 @@ def detect_name_match_quality(query_name: str, result: SearchResult) -> NameMatc
 
 
 def context_match_strength(result: SearchResult, context: ContextQuery) -> tuple[float, tuple[str, ...]]:
-    """Compute context match score using profession, location, and domain preferences."""
+    """Compute context match score using flexible public-identity hints."""
 
     reasons: list[str] = []
     score = 0.0
@@ -194,36 +236,52 @@ def context_match_strength(result: SearchResult, context: ContextQuery) -> tuple
     haystack_tokens = set(_normalized_tokens(haystack))
     haystack_tokens.update(_domain_tokens(result.domain))
 
-    if context.profession:
-        profession = normalize_name(context.profession)
-        if profession:
-            if profession in haystack:
+    def _score_hint(value: str | None, label: str, phrase_weight: float, overlap_weight: float) -> None:
+        nonlocal score
+        if not value:
+            return
+        normalized_value = normalize_name(value)
+        if not normalized_value:
+            return
+        if normalized_value in haystack:
+            score += phrase_weight
+            reasons.append(f"{label}_phrase_match")
+        overlap_score, overlap_reasons = _context_overlap_score(normalized_value, haystack_tokens, label=label)
+        score += overlap_weight * overlap_score
+        reasons.extend(overlap_reasons)
+
+    if context.role:
+        role = normalize_name(context.role)
+        if role:
+            if role in haystack:
                 score += 0.38
-                reasons.append("profession_phrase_match")
-            profession_tokens = [token for token in _normalized_tokens(profession) if token not in _CONTEXT_STOPWORDS]
-            if len(profession_tokens) >= 2 and all(token in haystack_tokens for token in profession_tokens):
+                reasons.append("role_phrase_match")
+            role_tokens = [token for token in _normalized_tokens(role) if token not in _CONTEXT_STOPWORDS]
+            if len(role_tokens) >= 2 and all(token in haystack_tokens for token in role_tokens):
                 score += 0.12
-                reasons.append("profession_reordered_match")
-            overlap_score, overlap_reasons = _context_overlap_score(profession, haystack_tokens, label="profession")
+                reasons.append("role_reordered_match")
+            overlap_score, overlap_reasons = _context_overlap_score(role, haystack_tokens, label="role")
             score += 0.28 * overlap_score
             reasons.extend(overlap_reasons)
 
-    if context.location:
-        location = normalize_name(context.location)
-        if location:
-            if location in haystack:
-                score += 0.3
-                reasons.append("location_phrase_match")
-            overlap_score, overlap_reasons = _context_overlap_score(location, haystack_tokens, label="location")
-            score += 0.25 * overlap_score
-            reasons.extend(overlap_reasons)
+    _score_hint(context.organization, "organization", 0.3, 0.2)
+    _score_hint(context.location, "location", 0.3, 0.25)
+    _score_hint(context.domain_activity, "activity", 0.2, 0.15)
+    _score_hint(context.media_platform, "platform", 0.2, 0.15)
+    _score_hint(context.institutional_hint, "institutional", 0.2, 0.14)
+
+    if context.generic_terms:
+        matched_terms = [term for term in context.generic_terms if term in haystack_tokens]
+        if matched_terms:
+            score += min(0.18, 0.06 * len(matched_terms))
+            reasons.append(f"generic_terms_match:{','.join(sorted(matched_terms)[:4])}")
 
     if context.expected_domains and any(result.domain.endswith(domain) for domain in context.expected_domains):
         score += 0.2
         reasons.append("domain_relevance")
 
-    if context.profession and context.location:
-        if all(token in haystack_tokens for token in _normalized_tokens(context.profession)[:2]) and any(
+    if context.role and context.location:
+        if all(token in haystack_tokens for token in _normalized_tokens(context.role)[:2]) and any(
             token in haystack_tokens for token in _normalized_tokens(context.location)
         ):
             score += 0.1
@@ -239,7 +297,7 @@ def is_noise_result(result: SearchResult) -> bool:
     noisy_phrases = ("top ", "best ", "list of", "find people", "people search")
 
     return (
-        detect_entity_type(result) == "directory"
+        detect_entity_type(result) in {"directory", "aggregator"}
         or any(phrase in text for phrase in noisy_phrases)
         or re.search(r"\b(aggregator|directory|listing)\b", text) is not None
     )
@@ -258,9 +316,15 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
 
     entity_weights: dict[EntityType, float] = {
         "person_profile": 0.35,
-        "company_page": 0.14,
+        "official_profile": 0.33,
+        "official_bio": 0.24,
+        "academic_profile": 0.3,
+        "institutional_profile": 0.2,
+        "media_profile": 0.22,
+        "creator_profile": 0.24,
         "article": 0.05,
         "directory": -0.25,
+        "aggregator": -0.2,
         "unknown": 0.0,
     }
     score += entity_weights[entity_type]
@@ -287,14 +351,35 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     score += 0.5 * context_strength
     reasons.extend(context_reasons)
 
-    has_context_constraints = any([context.profession, context.location, context.expected_domains])
+    has_context_constraints = any(
+        [
+            context.role,
+            context.organization,
+            context.location,
+            context.domain_activity,
+            context.media_platform,
+            context.institutional_hint,
+            context.generic_terms,
+            context.expected_domains,
+        ]
+    )
     if has_context_constraints and name_match in {"full_match", "reordered_match"} and context_strength < 0.12:
         score -= 0.3
         reasons.append("weak_context_exact_name_penalty")
 
-    if entity_type == "person_profile":
+    if entity_type in {"person_profile", "official_profile", "academic_profile", "creator_profile"}:
         score += 0.08
         reasons.append("profile_structure_bonus")
+
+    if context.role and entity_type in {"official_profile", "official_bio"}:
+        score += 0.06
+        reasons.append("role_official_alignment_bonus")
+    if context.media_platform and entity_type in {"creator_profile", "media_profile"}:
+        score += 0.08
+        reasons.append("creator_media_alignment_bonus")
+    if context.institutional_hint and entity_type in {"academic_profile", "institutional_profile"}:
+        score += 0.08
+        reasons.append("institutional_alignment_bonus")
 
     if any(result.domain.endswith(domain) for domain in _HIGH_SIGNAL_DOMAINS):
         score += 0.08
@@ -307,6 +392,10 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
         else:
             score += 0.02
             reasons.append("network_profile_presence")
+
+    if entity_type == "article" and has_context_constraints and context_strength < 0.22:
+        score -= 0.12
+        reasons.append("article_low_context_penalty")
 
     if noisy:
         score -= 0.35
@@ -435,7 +524,11 @@ def infer_profile_signals(content: TopCandidateContent) -> tuple[str, str | None
     )
     normalized_name = normalize_name(content.page_title.split("|")[0]) if content.page_title else ""
 
-    role_match = re.search(r"\b(engineer|developer|manager|director|analyst|researcher|journalist|designer)\b", merged, re.I)
+    role_match = re.search(
+        r"\b(engineer|developer|manager|director|analyst|researcher|journalist|designer|actor|actress|musician|professor|creator|streamer|author|lawyer|psychologist)\b",
+        merged,
+        re.I,
+    )
     org_match = re.search(r"\b(?:at|with)\s+([A-Z][A-Za-z0-9&.\- ]{2,40})", merged)
     location_match = re.search(r"\b(?:based in|located in|from)\s+([A-Z][A-Za-z .-]{2,40})", merged)
 
@@ -458,14 +551,30 @@ def resolve_identity(
     query_name: str,
     results: Iterable[SearchResult],
     *,
-    profession: str | None = None,
+    role: str | None = None,
+    organization: str | None = None,
     location: str | None = None,
+    domain_activity: str | None = None,
+    media_platform: str | None = None,
+    institutional_hint: str | None = None,
+    raw_context: str | None = None,
+    generic_terms: tuple[str, ...] = (),
     expected_domains: tuple[str, ...] = (),
     fetcher: Callable[[str], str] | None = None,
 ) -> ResolutionOutput | None:
     """Resolve the highest-confidence identity candidate and extract top-page signals."""
 
-    context = ContextQuery(profession=profession, location=location, expected_domains=expected_domains)
+    context = ContextQuery(
+        role=role,
+        organization=organization,
+        location=location,
+        domain_activity=domain_activity,
+        media_platform=media_platform,
+        institutional_hint=institutional_hint,
+        raw_context=raw_context,
+        generic_terms=generic_terms,
+        expected_domains=expected_domains,
+    )
     ranked = rank_candidates(results, query_name, context)
     if not ranked:
         return None
@@ -489,7 +598,7 @@ def resolve_identity(
         resolution_path = "search_only"
 
     score_gap = top.score - second.score if second else 1.0
-    low_evidence = top.score < 0.4 or top.name_match == "weak_match" or top.entity_type in {"unknown", "article"}
+    low_evidence = top.score < 0.4 or top.name_match == "weak_match" or top.entity_type in {"unknown", "article", "aggregator"}
     close_competition = second is not None and score_gap < 0.08 and second.score > 0.33
     ambiguity_detected = low_evidence or close_competition
     ambiguity_reason = None

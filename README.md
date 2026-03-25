@@ -1,6 +1,6 @@
 # GranEye
 
-GranEye is a modular Python OSINT prototype with deterministic analysis and identity resolution.
+GranEye is a modular Python OSINT prototype for lawful, explainable public-identity resolution from open-web evidence.
 
 ## Highlights
 
@@ -8,7 +8,7 @@ GranEye is a modular Python OSINT prototype with deterministic analysis and iden
 - Deterministic candidate name extraction with multilingual support.
 - URL heuristics to separate directory listings from profile pages.
 - Identity clustering based on normalized names/handles.
-- Evidence-driven candidate ranking using title/snippet/URL signals.
+- Evidence-driven candidate ranking across professional, academic, institutional, media, creator, and mixed public contexts.
 - Top-candidate page extraction with lightweight rule-based profile inference.
 - Graceful fallback paths when target pages block scraping (for example HTTP 999).
 
@@ -30,21 +30,51 @@ python -m graneye "Laura Gómez Martínez" "Lawyer Barcelona"
 
 Notes:
 - `target_name` is required.
-- `target_context` is optional and can improve disambiguation.
+- `target_context` is optional and can be broad (for example: `Lawyer Barcelona`, `Actress`, `YouTuber Spain`, `University professor Madrid`, `TV personality`).
 - Use `graneye --help` for argument details.
 - CLI output includes `Resolution path` (`full_content`, `partial_content`, `search_only`, or `fetch_blocked`) and `Fetch status`.
-- `--debug` prints query attempts, raw/normalized/filtered/ranked counts, discarded candidates with reasons, retained candidates, and scored ranking signals.
+- `--debug` prints query attempts, context interpretation, source diversity, raw/normalized/filtered/ranked counts, discarded candidates with reasons, retained candidates, and scored ranking signals.
+
+### Source Categories
+
+GranEye classifies public-web candidates into explainable source types:
+
+- `person_profile`
+- `official_profile`
+- `official_bio`
+- `academic_profile`
+- `institutional_profile`
+- `media_profile`
+- `creator_profile`
+- `article`
+- `directory`
+- `aggregator`
+- `unknown`
+
+This enables context-sensitive ranking rather than fixed professional-only bias.
 
 ## Reliability Behavior
 
 GranEye uses layered fallback so a blocked page fetch does not invalidate ranking:
 
 1. Run multiple query variants (`name + context`, quoted name + context, and name-only), using DuckDuckGo HTML with Lite fallback plus Instant Answer topics.
-2. Rank all normalized results using deterministic identity/context signals.
+2. Rank all normalized results using deterministic identity/context signals with source-type balancing.
 3. Attempt to fetch the top candidate page for enrichment.
 4. If fetching fails or is blocked, keep ranked search evidence and return a search-grounded result instead of failing the full pipeline.
 
 This means output can still be meaningful even when a website denies bot-like requests.
+
+## Confidence and Ambiguity
+
+- GranEye reports `high`, `medium`, or `low` confidence.
+- Ambiguity remains explicit: weak evidence and close candidate competition are surfaced instead of forced certainty.
+- Low-confidence outputs are expected for broad/banal names or no-context queries.
+
+## Legal and Data Boundaries
+
+- GranEye is designed for public-web evidence only.
+- It does not use external AI APIs, private data brokers, hidden data extraction, or non-public account access.
+- Use it only for lawful and legitimate identity-resolution workflows.
 
 ## Current Limitations
 

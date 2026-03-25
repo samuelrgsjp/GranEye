@@ -125,6 +125,7 @@ def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
         f"Filtered results count: {diagnostics.filtered_results_count}",
         f"Ranked candidates count: {diagnostics.ranked_candidates_count}",
         f"Source diversity (domains): {diagnostics.source_diversity_count}",
+        f"Context interpretation: {diagnostics.context_interpretation or '(none)'}",
         f"Ambiguity triggered: {'yes' if diagnostics.ambiguity_triggered else 'no'}",
         f"Ambiguity reason: {diagnostics.ambiguity_reason or '(none)'}",
         "Discarded candidates:",

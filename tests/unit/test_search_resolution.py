@@ -19,11 +19,11 @@ from graneye.search import SearchResult, enrich_search_results
     [
         ("https://www.linkedin.com/in/jane-doe-123/", "person_profile"),
         ("https://example.com/directory/people", "directory"),
-        ("https://example.com/company/acme", "company_page"),
+        ("https://example.com/company/acme", "official_bio"),
         ("https://example.com/news/jane-doe-award", "article"),
-        ("https://university.example.edu/faculty/ana-ruiz-lopez", "person_profile"),
-        ("https://lawfirm.example.com/attorneys/francois-dupont", "person_profile"),
-        ("https://corp.example.com/leadership/hans-muller", "person_profile"),
+        ("https://university.example.edu/faculty/ana-ruiz-lopez", "academic_profile"),
+        ("https://lawfirm.example.com/attorneys/francois-dupont", "official_profile"),
+        ("https://corp.example.com/leadership/hans-muller", "official_profile"),
     ],
 )
 def test_entity_type_detection(url: str, expected_type: str) -> None:
@@ -117,7 +117,7 @@ def test_ambiguous_identity_uses_context(
     ranked = rank_candidates(
         enrich_search_results(raw_results),
         "Alex Kim",
-        ContextQuery(profession=profession, location=location),
+        ContextQuery(role=profession, location=location),
     )
     assert ranked[0].result.url == expected_top
 
@@ -169,7 +169,7 @@ def test_exact_name_weak_context_does_not_outrank_context_aligned_candidate() ->
             ]
         ),
         "John Smith",
-        ContextQuery(profession="Software Engineer", location="London"),
+        ContextQuery(role="Software Engineer", location="London"),
     )
     assert ranked[0].result.url == "https://uk-dev.example.org/in/john-smith-london"
     assert any("weak_context_exact_name_penalty" in reason for reason in ranked[1].reasons)
@@ -182,9 +182,9 @@ def test_context_match_strength_works_with_title_only_reordered_context() -> Non
         domain="microsoft.com",
         snippet=None,
     )
-    score, reasons = context_match_strength(result, ContextQuery(profession="Microsoft CEO"))
+    score, reasons = context_match_strength(result, ContextQuery(role="Microsoft CEO"))
     assert score > 0.25
-    assert any(reason.startswith("profession_token_overlap") for reason in reasons)
+    assert any(reason.startswith("role_token_overlap") for reason in reasons)
 
 
 def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> None:
@@ -204,7 +204,7 @@ def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> N
             ]
         ),
         "Carlos Pérez",
-        ContextQuery(profession="Cybersecurity", location="Spain"),
+        ContextQuery(role="Cybersecurity", location="Spain"),
     )
     assert ranked[0].result.url == "https://security-spain.example.org/in/carlos-perez"
 
@@ -226,7 +226,7 @@ def test_context_aligned_company_page_can_beat_low_context_linkedin() -> None:
             ]
         ),
         "John Smith",
-        ContextQuery(profession="Platform Engineering Director", location="London"),
+        ContextQuery(role="Platform Engineering Director", location="London"),
     )
     assert ranked[0].result.url == "https://exampleai.com/company/leadership/john-smith"
 
@@ -266,7 +266,7 @@ def test_ambiguous_common_name_sets_multiple_plausible_reason() -> None:
                 },
             ]
         ),
-        profession="Software Engineer",
+        role="Software Engineer",
         location="London",
     )
     assert output is not None
@@ -331,3 +331,48 @@ def test_resolve_identity_falls_back_when_fetch_is_blocked() -> None:
     assert output.resolution_path == "fetch_blocked"
     assert output.fetch_status == "http_error:999"
     assert output.source_url == "https://www.linkedin.com/in/jane-doe"
+
+
+def test_creator_profile_outweighs_generic_article_for_creator_context() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Ibai Llanos wins streaming awards",
+                    "url": "https://news.example.com/article/ibai-awards",
+                    "snippet": "Public figure recognized in Spain.",
+                },
+                {
+                    "title": "Ibai Llanos - YouTube",
+                    "url": "https://www.youtube.com/@Ibai",
+                    "snippet": "Streamer and creator from Spain.",
+                },
+            ]
+        ),
+        "Ibai Llanos",
+        ContextQuery(role="streamer", media_platform="youtube", location="Spain"),
+    )
+    assert ranked[0].entity_type == "creator_profile"
+    assert ranked[0].result.url == "https://www.youtube.com/@Ibai"
+
+
+def test_academic_profile_outweighs_news_when_context_is_faculty() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "María García appears in conference news",
+                    "url": "https://press.example.com/news/maria-garcia-conference",
+                    "snippet": "Professor from Madrid discusses education.",
+                },
+                {
+                    "title": "María García - Faculty Profile",
+                    "url": "https://university.example.edu/faculty/maria-garcia",
+                    "snippet": "Professor at University of Madrid.",
+                },
+            ]
+        ),
+        "María García",
+        ContextQuery(role="professor", institutional_hint="university", location="Madrid"),
+    )
+    assert ranked[0].entity_type == "academic_profile"

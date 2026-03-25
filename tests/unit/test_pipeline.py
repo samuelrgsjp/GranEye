@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from graneye.pipeline import resolve_query, resolve_query_with_debug
+from graneye.pipeline import _parse_context, _query_variants, resolve_query, resolve_query_with_debug
 
 
 def test_resolve_query_merges_html_and_instant_results_without_duplicates() -> None:
@@ -118,3 +118,18 @@ def test_resolve_query_with_debug_reports_ambiguity_when_candidates_are_close() 
     assert output is not None
     assert output.ambiguity_detected is True
     assert diagnostics.ambiguity_triggered is True
+
+
+def test_parse_context_supports_public_creator_hints() -> None:
+    parsed = _parse_context("Streamer Spain YouTube")
+    assert parsed.role == "streamer"
+    assert parsed.media_platform == "youtube"
+    assert parsed.domain_activity == "Streamer Spain YouTube"
+    assert "streamer" in parsed.generic_terms
+
+
+def test_query_variants_expand_beyond_professional_context() -> None:
+    variants = _query_variants("Penélope Cruz", "Actress")
+    assert "Penélope Cruz Actress official" in variants
+    assert "Penélope Cruz Actress wikipedia" in variants
+    assert "\"Penélope Cruz\" Actress official bio" in variants
