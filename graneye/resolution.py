@@ -39,6 +39,7 @@ SourceAuthorityTier = Literal[
 _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages", "officialboard"}
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers", "executive", "management"}
 _ARTICLE_HINTS = {"news", "blog", "article", "press"}
+_EVENT_HINTS = {"event", "events", "conference", "keynote", "summit", "webinar", "session"}
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
 _OFFICIAL_PROFILE_SEGMENTS = {
     "leadership",
@@ -164,6 +165,18 @@ _NON_CORPORATE_OFFICIAL_HINTS = {
 _PRIMARY_OFFICIAL_ENTITY_TYPES = {"official_profile", "official_bio", "institutional_profile"}
 _STRUCTURED_PROFILE_DOMAINS = {"researchgate.net", "orcid.org", "about.me", "academia.edu"}
 _PLATFORM_SECONDARY_HINTS = {"gaming", "espanol", "español", "clips", "live", "shorts", "podcast", "music", "records"}
+_DISTINCTIVE_TITLES = {"pope"}
+_COMMON_NAME_TOKENS = {
+    "john",
+    "david",
+    "carlos",
+    "maria",
+    "martinez",
+    "perez",
+    "lopez",
+    "smith",
+    "garcia",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -328,6 +341,8 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
     if any(domain.endswith(token) for token in _REFERENCE_HINTS):
         return "reference_entry", ("reference_domain_pattern",)
 
+    if any(segment in _EVENT_HINTS for segment in path_segments):
+        return "media_article", ("event_or_keynote_path_pattern",)
     if any(segment in _ARTICLE_HINTS for segment in path_segments) or any(hint in joined_text for hint in (" breaking ", "headline", "op-ed")):
         return "media_article", ("article_path_or_title_pattern",)
 
@@ -797,7 +812,7 @@ def _cluster_identity_evidence(ranked: list[ScoredCandidate], query_name: str, c
         grouped.setdefault(key, []).append(candidate)
     clusters: list[IdentityClusterEvidence] = []
     for key, members in grouped.items():
-        representative = max(members, key=lambda item: item.score)
+        representative = max(members, key=lambda item: _representative_priority(item, context))
         domains = {item.result.domain for item in members}
         official_support_count = sum(1 for item in members if item.authority_tier == "official_institutional")
         strong_source_count = sum(
@@ -837,6 +852,76 @@ def _cluster_identity_evidence(ranked: list[ScoredCandidate], query_name: str, c
         )
     )
     return clusters
+
+
+def _is_person_specific_page(candidate: ScoredCandidate) -> bool:
+    parsed = urlparse(candidate.result.url)
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    if candidate.entity_type in {"official_profile", "official_bio", "person_profile"}:
+        return True
+    if candidate.entity_type == "institutional_profile" and any(segment in {"faculty", "staff", "people", "leadership", "team"} for segment in segments):
+        return True
+    return False
+
+
+def _representative_priority(candidate: ScoredCandidate, context: ContextQuery) -> tuple[float, ...]:
+    parsed = urlparse(candidate.result.url)
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    official_person = (
+        candidate.authority_tier == "official_institutional"
+        and candidate.entity_type in {"official_bio", "official_profile", "institutional_profile"}
+        and _is_person_specific_page(candidate)
+    )
+    official_event_or_news = any(segment in _EVENT_HINTS | _ARTICLE_HINTS for segment in segments)
+    authority_priority = {
+        "official_institutional": 5,
+        "public_structured_profile": 4,
+        "strong_encyclopedic": 3,
+        "reputable_media": 2,
+        "low_authority_bio_seo": 1,
+        "directory_aggregator": 0,
+        "junk_or_malformed": -1,
+    }[candidate.authority_tier]
+    entity_priority = {
+        "official_bio": 6,
+        "official_profile": 6,
+        "institutional_profile": 5,
+        "person_profile": 4,
+        "reference_entry": 3,
+        "media_article": 2,
+        "generic_article": 1,
+        "unknown": 0,
+        "aggregator_profile": -1,
+        "directory_listing": -2,
+    }[candidate.entity_type]
+    context_bonus = candidate.context_strength if context.raw_context else 0.0
+    event_penalty = 0.7 if official_event_or_news else 0.0
+    person_bonus = 0.6 if official_person else (0.2 if _is_person_specific_page(candidate) else 0.0)
+    return (
+        person_bonus + entity_priority + authority_priority - event_penalty,
+        candidate.score + context_bonus,
+        candidate.typing_confidence,
+    )
+
+
+def _query_distinctiveness(query_name: str) -> float:
+    tokens = _normalized_tokens(query_name)
+    if not tokens:
+        return 0.0
+    score = 0.0
+    if len(tokens) >= 2:
+        score += 0.28
+    if len(tokens) >= 3:
+        score += 0.14
+    if any(token in _DISTINCTIVE_TITLES for token in tokens):
+        score += 0.3
+    if any(len(token) >= 7 for token in tokens):
+        score += 0.12
+    if len(tokens) == 1 and any(char.isalpha() for char in tokens[0]) and any(char.isupper() for char in query_name):
+        score += 0.18
+    common_hits = sum(1 for token in tokens if token in _COMMON_NAME_TOKENS)
+    score -= 0.18 * common_hits
+    return max(0.0, min(0.9, score))
 
 
 def _entity_typing_confidence(entity_type: EntityType, reasons: tuple[str, ...]) -> float:
@@ -1229,6 +1314,13 @@ def resolve_identity(
     evidence_strength += 0.12 * canonical_name_quality
     if official_superiority:
         evidence_strength += 0.08
+    distinctiveness = _query_distinctiveness(query_name)
+    if top.authority_tier in {"official_institutional", "strong_encyclopedic"} and top.name_match in {"full_match", "reordered_match"}:
+        distinctiveness += 0.14
+    if second_cluster is None or score_gap >= 0.16:
+        distinctiveness += 0.08
+    distinctiveness = min(1.0, distinctiveness)
+    evidence_strength += min(0.16, 0.18 * distinctiveness)
     ambiguity_detected = close_competition or common_name_competition
     ambiguity_reason = "multiple_plausible_candidates" if ambiguity_detected else None
     if second is not None and top.authority_tier == "official_institutional":
@@ -1254,7 +1346,19 @@ def resolve_identity(
         and top.name_match in {"full_match", "reordered_match"}
         and top.entity_type in {"official_profile", "official_bio", "institutional_profile", "person_profile", "reference_entry"}
     )
+    strong_single_source_resolution = (
+        winning_cluster.independent_domains == 1
+        and top.name_match in {"full_match", "reordered_match"}
+        and canonical_name_quality >= 0.55
+        and top.authority_tier in {"official_institutional", "strong_encyclopedic", "public_structured_profile"}
+        and top.entity_type not in {"directory_listing", "aggregator_profile", "generic_article", "unknown"}
+        and top.context_strength >= 0.15
+        and not (second_cluster is not None and score_gap < 0.08)
+        and distinctiveness >= 0.45
+    )
     insufficient_evidence = (evidence_strength < 0.56 and not strong_top_profile) or weak_top_evidence
+    if strong_single_source_resolution and weak_top_evidence is False:
+        insufficient_evidence = False
     confidence_label: Literal["high", "medium", "low"] = "high"
     if insufficient_evidence:
         confidence_label = "low"
@@ -1301,13 +1405,17 @@ def resolve_identity(
             confidence_label = "medium"
         evidence_strength = min(evidence_strength, 0.72)
     if single_encyclopedic_fallback:
-        confidence_label = "low"
+        if distinctiveness >= 0.62 and top.name_match in {"full_match", "reordered_match"} and top.context_strength >= 0.12:
+            confidence_label = "medium"
+        else:
+            confidence_label = "low"
 
     wikipedia_fallback_without_context = (
         top.result.domain.endswith("wikipedia.org")
         and top.context_strength < 0.2
         and (second is None or score_gap < 0.2)
         and query_validity.status == "valid"
+        and distinctiveness < 0.48
     )
     if wikipedia_fallback_without_context:
         return ResolutionOutput(

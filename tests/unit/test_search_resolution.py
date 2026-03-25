@@ -847,8 +847,8 @@ def test_creator_multi_channel_ecosystem_not_marked_ambiguous() -> None:
     assert output.ambiguity_detected is False
 
 
-@pytest.mark.parametrize("query", ["Satya Nadella", "Jensen Huang"])
-def test_no_context_encyclopedic_fallback_reason_for_distinctive_name(query: str) -> None:
+@pytest.mark.parametrize("query", ["Carlos Pérez", "María López"])
+def test_no_context_encyclopedic_fallback_reason_for_common_name(query: str) -> None:
     output = resolve_identity(
         query,
         enrich_search_results(
@@ -864,3 +864,127 @@ def test_no_context_encyclopedic_fallback_reason_for_distinctive_name(query: str
     assert output is not None
     assert output.no_resolution is True
     assert output.no_resolution_reason == "generic_encyclopedic_fallback_without_support"
+
+
+def test_jensen_huang_nvidia_ceo_resolves_with_official_representation() -> None:
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang keynote at NVIDIA GTC",
+                    "url": "https://www.nvidia.com/en-us/events/gtc/keynote/",
+                    "snippet": "Watch NVIDIA CEO Jensen Huang's keynote.",
+                },
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA biography for founder and CEO Jensen Huang.",
+                },
+                {
+                    "title": "Jensen Huang discusses AI market",
+                    "url": "https://apnews.com/article/jensen-huang-ai",
+                    "snippet": "AP coverage of NVIDIA CEO Jensen Huang.",
+                },
+            ]
+        ),
+        role="CEO",
+        organization="NVIDIA",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.confidence_label in {"high", "medium"}
+    assert output.source_url == "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/"
+
+
+def test_jensen_huang_nvidia_founder_ceo_resolves() -> None:
+    output = resolve_identity(
+        "Jensen Huang",
+        enrich_search_results(
+            [
+                {
+                    "title": "Jensen Huang - Founder and CEO",
+                    "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/",
+                    "snippet": "Official NVIDIA founder and CEO biography.",
+                }
+            ]
+        ),
+        role="CEO founder",
+        organization="NVIDIA",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.confidence_label in {"high", "medium"}
+
+
+def test_satya_nadella_microsoft_executive_resolves_at_least_medium() -> None:
+    output = resolve_identity(
+        "Satya Nadella",
+        enrich_search_results(
+            [
+                {
+                    "title": "Satya Nadella - Chairman and CEO",
+                    "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                    "snippet": "Official Microsoft leadership profile for Satya Nadella.",
+                }
+            ]
+        ),
+        role="executive",
+        organization="Microsoft",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.confidence_label in {"high", "medium"}
+
+
+@pytest.mark.parametrize(
+    ("name", "context", "expected_domain"),
+    [
+        ("Pope Francis", {"institutional_hint": "vatican"}, "wikipedia.org"),
+        ("Lionel Messi", {"domain_activity": "football", "location": "argentina"}, "wikipedia.org"),
+        ("MrBeast", {"media_platform": "youtube"}, "wikipedia.org"),
+        ("Taylor Swift", {"role": "singer", "domain_activity": "music", "location": "usa"}, "wikipedia.org"),
+    ],
+)
+def test_distinctive_public_figures_resolve_from_single_strong_encyclopedic_source(
+    name: str,
+    context: dict[str, str],
+    expected_domain: str,
+) -> None:
+    output = resolve_identity(
+        name,
+        enrich_search_results(
+            [
+                {
+                    "title": f"{name} - Wikipedia",
+                    "url": f"https://en.wikipedia.org/wiki/{name.replace(' ', '_')}",
+                    "snippet": f"{name} public figure profile.",
+                }
+            ]
+        ),
+        **context,
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.source_url.endswith(expected_domain) or expected_domain in output.source_url
+    assert output.confidence_label in {"medium", "low"}
+
+
+def test_source_diversity_not_required_when_single_official_source_is_strong() -> None:
+    output = resolve_identity(
+        "Satya Nadella",
+        enrich_search_results(
+            [
+                {
+                    "title": "Satya Nadella - Chairman and CEO",
+                    "url": "https://www.microsoft.com/en-us/about/leadership/satya-nadella",
+                    "snippet": "Official Microsoft leadership profile.",
+                }
+            ]
+        ),
+        role="CEO",
+        organization="Microsoft",
+    )
+    assert output is not None
+    assert output.no_resolution is False
+    assert output.source_url == "https://www.microsoft.com/en-us/about/leadership/satya-nadella"

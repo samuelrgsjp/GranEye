@@ -84,6 +84,12 @@ _ROLE_HINTS = {
     "author",
     "speaker",
     "host",
+    "singer",
+    "footballer",
+    "player",
+    "founder",
+    "cofounder",
+    "co-founder",
 }
 _PLATFORM_HINTS = {"youtube", "twitch", "tiktok", "instagram", "x", "twitter", "linkedin", "github", "wikipedia"}
 _INSTITUTIONAL_HINTS = {"university", "faculty", "department", "staff", "official", "government", "ministerio"}
@@ -101,8 +107,11 @@ _KNOWN_LOCATION_TOKENS = {
     "paris",
     "berlin",
     "rome",
+    "argentina",
+    "usa",
 }
 _ACTIVITY_HINTS = {"cybersecurity", "security", "software", "cloud", "finance", "healthcare", "ai", "ml", "data"}
+_ORG_STOPWORDS = _ROLE_HINTS | {"founder", "cofounder", "co-founder", "chairman", "music", "football", "youtube"}
 _ROLE_PHRASES = (
     "software engineer",
     "platform engineering director",
@@ -174,13 +183,35 @@ def _parse_context(context: str | None) -> ContextQuery:
             prefix = words[:first_role_idx]
             if prefix and any(piece[:1].isupper() for piece in prefix):
                 organization = " ".join(prefix).strip()
+    if organization is None and len(words) >= 2:
+        inferred_org_tokens: list[str] = []
+        for original, lowered_token in zip(words, tokens):
+            if lowered_token in _ORG_STOPWORDS:
+                break
+            if lowered_token in _KNOWN_LOCATION_TOKENS:
+                break
+            if lowered_token in _PLATFORM_HINTS:
+                break
+            inferred_org_tokens.append(original)
+        if inferred_org_tokens and any(char.isupper() for char in "".join(inferred_org_tokens)):
+            organization = " ".join(inferred_org_tokens).strip()
+    if organization:
+        organization = re.sub(r"\b(founder|cofounder|co-founder|ceo|executive)\b.*$", "", organization, flags=re.I).strip()
     if organization and location and organization.casefold() == location.casefold():
         location = None
 
+    activity_tokens = [token for token in tokens if token in _ACTIVITY_HINTS]
+    if activity_tokens:
+        domain_activity = " ".join(dict.fromkeys(activity_tokens))
+
     if role is None:
-        activity_tokens = [token for token in tokens if token in _ACTIVITY_HINTS]
-        if activity_tokens:
-            domain_activity = " ".join(dict.fromkeys(activity_tokens))
+        if "football" in tokens:
+            role = "footballer"
+            if domain_activity is None:
+                domain_activity = "football"
+        elif "music" in tokens and "singer" in tokens:
+            role = "singer"
+            domain_activity = "music"
 
     generic_terms = tuple(
         token for token in dict.fromkeys(tokens) if token not in _STOP_TOKENS and token not in _LOCATION_PREPOSITIONS
