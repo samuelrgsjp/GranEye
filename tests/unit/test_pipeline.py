@@ -181,7 +181,7 @@ def test_resolve_query_aligns_ranked_top_with_selected_representative() -> None:
     )
     assert output is not None
     assert output.no_resolution is False
-    assert output.source_url.startswith("https://www.nvidia.com/")
+    assert output.source_url.startswith("https://nvidia.com/")
     assert ranked[0].result.url == output.source_url
     assert diagnostics.ranked_candidates[0].result.url == output.source_url
 
@@ -321,3 +321,36 @@ def test_canonicalize_url_normalizes_www_utm_and_trailing_slash() -> None:
     a = _canonicalize_url("https://www.example.com/in/jane/?utm_source=x&utm_medium=y&b=2&a=1")
     b = _canonicalize_url("https://example.com/in/jane?b=2&a=1")
     assert a == b
+
+
+def test_canonicalize_url_normalizes_default_ports_fragments_and_query_order() -> None:
+    from graneye.pipeline import _canonicalize_url
+
+    a = _canonicalize_url("https://www.example.com:443//in//jane///?b=2&utm_source=abc&a=1#profile")
+    b = _canonicalize_url("https://example.com/in/jane?a=1&b=2")
+    assert a == b
+
+
+def test_repeated_runs_keep_same_top_url_and_semantics() -> None:
+    data = [
+        {
+            "title": "Jensen Huang - Founder and CEO",
+            "url": "https://www.nvidia.com/en-us/about-nvidia/jensen-huang/?utm_campaign=x",
+            "snippet": "Official NVIDIA profile",
+        },
+        {
+            "title": "Jensen Huang - Wikipedia",
+            "url": "https://en.wikipedia.org/wiki/Jensen_Huang",
+            "snippet": "Co-founder and CEO of Nvidia",
+        },
+    ]
+    runs = [
+        resolve_query("Jensen Huang", context="NVIDIA CEO", html_search=lambda _q: data, instant_search=lambda _q: list(reversed(data)))
+        for _ in range(5)
+    ]
+    outputs = [item[0] for item in runs]
+    ranked_lists = [item[1] for item in runs]
+    assert all(output is not None for output in outputs)
+    assert len({output.source_url for output in outputs if output is not None}) == 1
+    assert len({output.no_resolution for output in outputs if output is not None}) == 1
+    assert len({tuple(candidate.result.url for candidate in ranked) for ranked in ranked_lists}) == 1
