@@ -145,6 +145,15 @@ def test_parse_context_disambiguates_role_org_location_activity() -> None:
     assert engineer.role == "software engineer"
     assert engineer.location == "Madrid"
 
+    founder = _parse_context("NVIDIA founder CEO")
+    assert founder.organization == "NVIDIA"
+    assert founder.role is not None
+    assert "ceo" in founder.role
+
+    messi = _parse_context("football argentina")
+    assert messi.domain_activity == "football"
+    assert messi.location == "argentina"
+
 
 def test_query_variants_expand_beyond_professional_context() -> None:
     variants = _query_variants("Penélope Cruz", "Actress")
