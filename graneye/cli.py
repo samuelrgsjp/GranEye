@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .pipeline import SearchPipelineDiagnostics, resolve_query, resolve_query_with_debug
-from .resolution import ResolutionOutput, ScoredCandidate, assess_query_validity
+from .resolution import ResolutionOutput, ScoredCandidate, _looks_like_person_title, assess_query_validity
+from .normalization import normalize_name
 from .search import search_duckduckgo_html, search_duckduckgo_instant_answer
 
 
@@ -172,6 +174,13 @@ def _resolution_status(output: ResolutionOutput | None) -> str:
     return "resolved"
 
 
+def _fallback_normalized_candidate_name(title: str) -> str:
+    if not title or not _looks_like_person_title(title):
+        return ""
+    title_fragment = re.split(r"\s[|\-–:]\s", title, maxsplit=1)[0].strip()
+    return normalize_name(title_fragment)
+
+
 def _build_final_output(
     *,
     query_validity: str,
@@ -228,10 +237,12 @@ def _build_final_output(
     # expose the strongest search candidate as evidence while preserving a
     # no-resolution status to avoid semantic fabrication.
     top = ranked[0]
+    top_title = top.result.title or ""
+    normalized_candidate_name = _fallback_normalized_candidate_name(top_title)
     return ResolutionOutput(
-        normalized_candidate_name=top.result.title or top.result.domain,
+        normalized_candidate_name=normalized_candidate_name,
         source_url=top.result.url,
-        source_title=top.result.title or "",
+        source_title=top_title,
         final_score=top.score,
         entity_type=top.entity_type,
         same_person_probability=top.score,
@@ -239,7 +250,7 @@ def _build_final_output(
         possible_role=None,
         possible_organization=None,
         possible_location=None,
-        explanation="content fetch failed; using ranked search evidence only.",
+        explanation="search-only fallback: ranked evidence available, but identity resolution did not complete.",
         resolution_path="search_only",
         fetch_status="not_attempted",
         confidence_label="low",

@@ -35,6 +35,28 @@ def _fake_ranked(url: str = "https://example.com/in/laura") -> list[ScoredCandid
     ]
 
 
+def _fake_ranked_with_title(title: str, *, url: str = "https://example.com/profile") -> list[ScoredCandidate]:
+    result = SearchResult(
+        title=title,
+        url=url,
+        domain="example.com",
+        snippet="Example snippet",
+    )
+    return [
+        ScoredCandidate(
+            result=result,
+            score=0.7,
+            entity_type="unknown",
+            name_match="weak_match",
+            context_strength=0.0,
+            authority_tier="reputable_media",
+            seo_penalty=0.0,
+            is_noise=False,
+            reasons=("entity:unknown",),
+        )
+    ]
+
+
 def _fake_output(url: str = "https://example.com/in/laura") -> ResolutionOutput:
     return ResolutionOutput(
         normalized_candidate_name="laura gomez martinez",
@@ -128,6 +150,42 @@ def test_main_falls_back_to_search_only_when_resolution_missing(
     assert "Status: no-resolution" in captured.out
     assert "Top candidate:" in captured.out
     assert "Reason: search_only_unverified_candidate" in captured.out
+
+
+def test_fallback_explanation_is_conservative_and_does_not_claim_fetch_failure() -> None:
+    output = cli._build_final_output(
+        query_validity="valid",
+        resolved=None,
+        ranked=_fake_ranked(),
+    )
+    assert output.explanation == "search-only fallback: ranked evidence available, but identity resolution did not complete."
+    assert "fetch failed" not in output.explanation
+
+
+def test_fallback_normalized_candidate_name_is_empty_for_non_person_article_title() -> None:
+    ranked = _fake_ranked_with_title("NVIDIA reports record quarterly revenue in 2026")
+    output = cli._build_final_output(
+        query_validity="valid",
+        resolved=None,
+        ranked=ranked,
+    )
+    assert output.normalized_candidate_name == ""
+    assert output.source_title == "NVIDIA reports record quarterly revenue in 2026"
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "search_only_unverified_candidate"
+
+
+def test_fallback_normalized_candidate_name_is_retained_for_person_like_title() -> None:
+    ranked = _fake_ranked_with_title("Jensen Huang - Founder and CEO")
+    output = cli._build_final_output(
+        query_validity="valid",
+        resolved=None,
+        ranked=ranked,
+    )
+    assert output.normalized_candidate_name == "jensen huang"
+    assert output.source_title == "Jensen Huang - Founder and CEO"
+    assert output.no_resolution is True
+    assert output.no_resolution_reason == "search_only_unverified_candidate"
 
 
 def test_main_no_candidates_status_consistent_between_human_and_json(
