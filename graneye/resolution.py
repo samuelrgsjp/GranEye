@@ -38,8 +38,10 @@ SourceAuthorityTier = Literal[
 
 _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages", "officialboard"}
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers", "executive", "management"}
-_ARTICLE_HINTS = {"news", "blog", "article", "press"}
+_ARTICLE_HINTS = {"news", "blog", "article", "press", "story", "markets", "announcement"}
 _EVENT_HINTS = {"event", "events", "conference", "keynote", "summit", "webinar", "session"}
+_IDENTITY_PATH_HINTS = {"leadership", "board", "executives", "executive", "management", "team", "bio", "profile", "faculty", "people", "staff"}
+_CONTEXTUAL_PATH_HINTS = _ARTICLE_HINTS | _EVENT_HINTS
 _PROFILE_SEGMENTS = {"in", "u", "user", "profile", "people"}
 _OFFICIAL_PROFILE_SEGMENTS = {
     "leadership",
@@ -322,6 +324,14 @@ def _looks_like_person_title(title: str) -> bool:
     return any(token in _PERSONISH_TOKENS for token in alpha_tokens)
 
 
+def _path_has_identity_hints(path_segments: list[str]) -> bool:
+    return any(segment in _IDENTITY_PATH_HINTS for segment in path_segments)
+
+
+def _path_has_contextual_hints(path_segments: list[str]) -> bool:
+    return any(segment in _CONTEXTUAL_PATH_HINTS for segment in path_segments)
+
+
 def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, tuple[str, ...]]:
     """Classify result and emit deterministic rationale for debug mode."""
 
@@ -343,9 +353,9 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
     if any(domain.endswith(token) for token in _REFERENCE_HINTS):
         return "reference_entry", ("reference_domain_pattern",)
 
-    if any(segment in _EVENT_HINTS for segment in path_segments):
-        return "media_article", ("event_or_keynote_path_pattern",)
-    if any(segment in _ARTICLE_HINTS for segment in path_segments) or any(hint in joined_text for hint in (" breaking ", "headline", "op-ed")):
+    if _path_has_contextual_hints(path_segments):
+        return "media_article", ("event_or_article_path_pattern",)
+    if any(hint in joined_text for hint in (" breaking ", "headline", "op-ed")):
         return "media_article", ("article_path_or_title_pattern",)
 
     if any(domain.endswith(platform_domain) for platform_domain in _CREATOR_PLATFORM_DOMAINS | _NETWORK_PROFILE_DOMAINS):
@@ -369,6 +379,11 @@ def detect_entity_type_with_reasons(result: SearchResult) -> tuple[EntityType, t
         if any(segment in path_segments for segment in {"faculty", "professor", "staff", "people"}):
             return "institutional_profile", ("academic_domain_or_path",)
         return "institutional_profile", ("institutional_academic_path",)
+
+    if _path_has_identity_hints(path_segments):
+        if personish_tail or personish_title:
+            return "official_profile", ("identity_path_with_person_signal",)
+        return "institutional_profile", ("identity_path_without_person_signal",)
 
     if len(path_segments) >= 2 and path_segments[-2] in _OFFICIAL_PROFILE_SEGMENTS:
         if personish_tail and (re.search(r"[-_]", tail_segment) or personish_title):
@@ -1235,11 +1250,65 @@ def _derive_representative_identity(candidate: ScoredCandidate, query_name: str)
     return ""
 
 
+def _same_person_support(candidate: ScoredCandidate, query_name: str, context: ContextQuery) -> bool:
+    if candidate.name_match not in {"full_match", "reordered_match"}:
+        return False
+    if candidate.entity_type not in _PRIMARY_OFFICIAL_ENTITY_TYPES:
+        return False
+    if candidate.authority_tier != "official_institutional":
+        return False
+    if context.organization:
+        org_norm = normalize_name(context.organization)
+        if org_norm and org_norm not in _joined_text(candidate.result):
+            return False
+    return candidate.context_strength >= 0.2
+
+
+def _candidate_adjustment(candidate: ScoredCandidate, *, strong_official_exists: bool, context: ContextQuery) -> float:
+    adjustment = 0.0
+    if strong_official_exists and candidate.entity_type in {"media_article", "generic_article"}:
+        adjustment -= 0.16
+    if strong_official_exists and candidate.result.domain.endswith("wikipedia.org"):
+        adjustment -= 0.08
+    if candidate.entity_type in _PRIMARY_OFFICIAL_ENTITY_TYPES and candidate.name_match in {"full_match", "reordered_match"}:
+        if context.organization and normalize_name(context.organization) in _joined_text(candidate.result):
+            adjustment += 0.08
+        if context.role and normalize_name(context.role) in _joined_text(candidate.result):
+            adjustment += 0.04
+    return adjustment
+
+
 def rank_candidates(results: Iterable[SearchResult], query_name: str, context: ContextQuery) -> list[ScoredCandidate]:
     """Rank all candidates deterministically using evidence-driven heuristics."""
 
     query_validity = assess_query_validity(query_name)
     scored = [score_candidate(result, query_name, context, query_validity) for result in results]
+    strong_official_exists = any(_same_person_support(item, query_name, context) for item in scored)
+    if strong_official_exists:
+        adjusted: list[ScoredCandidate] = []
+        for item in scored:
+            delta = _candidate_adjustment(item, strong_official_exists=True, context=context)
+            if delta == 0:
+                adjusted.append(item)
+                continue
+            updated_score = max(0.0, min(1.0, item.score + delta))
+            adjusted.append(
+                ScoredCandidate(
+                    result=item.result,
+                    score=updated_score,
+                    entity_type=item.entity_type,
+                    name_match=item.name_match,
+                    context_strength=item.context_strength,
+                    authority_tier=item.authority_tier,
+                    seo_penalty=item.seo_penalty,
+                    is_noise=item.is_noise,
+                    reasons=tuple([*item.reasons, f"pool_adjustment:{delta:+.2f}"]),
+                    query_validity=item.query_validity,
+                    score_cap_applied=item.score_cap_applied,
+                    typing_confidence=item.typing_confidence,
+                )
+            )
+        scored = adjusted
     authority_rank = {
         "official_institutional": 6,
         "public_structured_profile": 5,
