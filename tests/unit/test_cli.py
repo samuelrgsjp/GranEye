@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import io
 import runpy
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -431,3 +434,85 @@ def test_repeated_serialization_of_same_final_output_is_stable() -> None:
     )
     assert first == second
     assert cli._resolution_status(output) == "resolved"
+
+
+def test_batch_file_jsonl_processes_multiple_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+    batch_file = tmp_path / "targets.txt"
+    batch_file.write_text(
+        "\n# comment\nJensen Huang\tNVIDIA CEO\nCarlos Pérez\tCybersecurity Spain\nSatya Nadella\n",
+        encoding="utf-8",
+    )
+
+    code = cli.main(["--input-file", str(batch_file), "--jsonl"])
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+    payloads = [json.loads(line) for line in lines]
+
+    assert code == 0
+    assert len(payloads) == 3
+    assert payloads[0]["input_index"] == 1
+    assert payloads[2]["target_context"] is None
+    assert all(item["error"] is None for item in payloads)
+
+
+def test_batch_stdin_jsonl_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "resolve_query", lambda *_args, **_kwargs: (_fake_output(), _fake_ranked()))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Taylor Swift\tmusic singer usa\nSatya Nadella\n"))
+
+    code = cli.main(["--batch", "--jsonl"])
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+
+    assert code == 0
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    second = json.loads(lines[1])
+    assert first["target_name"] == "Taylor Swift"
+    assert second["target_context"] is None
+
+
+def test_batch_per_record_failure_does_not_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _resolve(name: str, **_kwargs: object) -> tuple[ResolutionOutput, list[ScoredCandidate]]:
+        if name == "Bad Name":
+            raise RuntimeError("bad record")
+        return _fake_output(), _fake_ranked()
+
+    monkeypatch.setattr(cli, "resolve_query", _resolve)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Good Name\tContext\nBad Name\tContext\nAnother Good\n"))
+
+    code = cli.main(["--batch", "--jsonl"])
+    captured = capsys.readouterr()
+    payloads = [json.loads(line) for line in captured.out.splitlines() if line.strip()]
+
+    assert code == 0
+    assert len(payloads) == 3
+    assert payloads[0]["error"] is None
+    assert payloads[1]["error"] == "bad record"
+    assert payloads[2]["error"] is None
+
+
+def test_batch_requires_batch_output_flags_for_single_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["--batch", "--json"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "use --jsonl for batch mode" in captured.err
+
+
+def test_batch_file_read_failure_returns_cli_error(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["--input-file", "missing-file.txt", "--jsonl"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "failed to read batch input" in captured.err
