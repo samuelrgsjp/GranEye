@@ -60,6 +60,8 @@ cat targets.txt | python -m graneye --batch --jsonl
 printf 'Jensen Huang\tNVIDIA CEO\nSatya Nadella\n' | python -m graneye --batch --jsonl
 ```
 
+`--batch` is the single stdin batch-mode switch.
+
 #### Batch input format rules (plain text)
 
 - Each record is one line.
@@ -82,6 +84,23 @@ Satya Nadella
 - Human-readable batch output (default in batch mode): compact per-record blocks.
 - `--jsonl` output (recommended for pipelines): one JSON object per input record.
 - `--json` remains single-query only.
+
+Human-readable example:
+
+```text
+[1] Jensen Huang | NVIDIA CEO
+Status: resolved
+Confidence: high
+Top candidate: jensen huang
+Source URL: https://www.nvidia.com/en-us/about-nvidia/jensen-huang/
+
+[2] Carlos Pérez | Cybersecurity Spain
+Status: no-resolution
+Confidence: low
+Top candidate: (none)
+Source URL: (none)
+Reason: insufficient_evidence
+```
 
 Batch JSONL objects include:
 
