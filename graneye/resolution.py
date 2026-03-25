@@ -26,6 +26,15 @@ EntityType = Literal[
     "unknown",
 ]
 NameMatchQuality = Literal["full_match", "reordered_match", "partial_match", "weak_match"]
+SourceAuthorityTier = Literal[
+    "official_institutional",
+    "strong_encyclopedic",
+    "reputable_media",
+    "public_structured_profile",
+    "directory_aggregator",
+    "low_authority_bio_seo",
+    "junk_or_malformed",
+]
 
 _DIRECTORY_HOST_HINTS = {"zoominfo", "rocketreach", "spokeo", "beenverified", "whitepages"}
 _COMPANY_HINTS = {"about", "company", "team", "leadership", "careers", "executive", "management"}
@@ -53,6 +62,40 @@ _ACADEMIC_DOMAIN_HINTS = {".edu", ".ac.", ".edu."}
 _MEDIA_DOMAIN_HINTS = {"imdb.com", "filmaffinity.com", "tmdb.org", "variety.com", "rollingstone.com"}
 _CREATOR_PLATFORM_DOMAINS = {"youtube.com", "twitch.tv", "tiktok.com", "patreon.com", "soundcloud.com", "substack.com"}
 _AGGREGATOR_HINTS = {"fandom", "wikidata", "wikia", "allfamous", "famousbirthdays"}
+_OFFICIAL_DOMAIN_HINTS = {
+    ".gov",
+    ".edu",
+    ".ac.",
+    "un.org",
+    "europa.eu",
+    "who.int",
+    "microsoft.com",
+    "google.com",
+    "nvidia.com",
+    "apple.com",
+    "openai.com",
+}
+_REPUTABLE_MEDIA_HINTS = {
+    "reuters.com",
+    "apnews.com",
+    "bbc.com",
+    "nytimes.com",
+    "wsj.com",
+    "theguardian.com",
+    "variety.com",
+    "rollingstone.com",
+}
+_LOW_AUTHORITY_BIO_HINTS = {
+    "biography",
+    "bio",
+    "networth",
+    "age",
+    "family",
+    "relationship",
+    "facts",
+    "height",
+    "wiki",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,6 +122,8 @@ class ScoredCandidate:
     entity_type: EntityType
     name_match: NameMatchQuality
     context_strength: float
+    authority_tier: SourceAuthorityTier
+    seo_penalty: float
     is_noise: bool
     reasons: tuple[str, ...]
 
@@ -112,6 +157,13 @@ class ResolutionOutput:
     confidence_label: Literal["high", "medium", "low"] = "medium"
     ambiguity_detected: bool = False
     ambiguity_reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class QueryValidityAssessment:
+    status: Literal["valid", "too_short", "too_generic", "non_person_like", "numeric_or_garbage"]
+    penalty: float
+    reasons: tuple[str, ...]
 
 
 def _normalized_tokens(value: str) -> list[str]:
@@ -303,6 +355,81 @@ def is_noise_result(result: SearchResult) -> bool:
     )
 
 
+def assess_query_validity(query_name: str) -> QueryValidityAssessment:
+    normalized = normalize_name(query_name)
+    tokens = [token for token in normalized.split() if token]
+    compact = re.sub(r"\s+", "", query_name)
+    reasons: list[str] = []
+
+    if not tokens or len(compact) <= 1:
+        return QueryValidityAssessment("too_short", 0.55, ("query_too_short",))
+    if re.fullmatch(r"[\d\W_]+", compact) or re.fullmatch(r"\d{4,}", compact):
+        return QueryValidityAssessment("numeric_or_garbage", 0.65, ("numeric_or_garbage_query",))
+    if len(tokens) == 1 and len(tokens[0]) <= 2:
+        return QueryValidityAssessment("too_short", 0.45, ("single_token_too_short",))
+    if len(tokens) == 1 and tokens[0] in {"person", "name", "profile", "biography"}:
+        return QueryValidityAssessment("too_generic", 0.45, ("generic_single_token_query",))
+    if sum(any(char.isalpha() for char in token) for token in tokens) == 0:
+        return QueryValidityAssessment("non_person_like", 0.5, ("no_alpha_person_signal",))
+    if len(tokens) > 6:
+        reasons.append("long_freeform_query")
+    return QueryValidityAssessment("valid", 0.0, tuple(reasons))
+
+
+def detect_source_authority(result: SearchResult) -> tuple[SourceAuthorityTier, float, list[str]]:
+    domain = result.domain.casefold()
+    url = result.url.casefold()
+    title = result.title.casefold()
+    snippet = (result.snippet or "").casefold()
+    text = f"{title} {snippet} {url}"
+    reasons: list[str] = []
+
+    if not domain or domain.count(".") == 0:
+        return "junk_or_malformed", -0.35, ["malformed_domain"]
+
+    if domain.endswith("wikipedia.org") or "britannica.com" in domain:
+        return "strong_encyclopedic", 0.18, ["encyclopedic_source"]
+    if any(domain.endswith(suffix) for suffix in _OFFICIAL_DOMAIN_HINTS):
+        return "official_institutional", 0.24, ["official_or_institutional_domain"]
+    if any(domain.endswith(media) for media in _REPUTABLE_MEDIA_HINTS):
+        return "reputable_media", 0.16, ["reputable_media_domain"]
+    if any(domain.endswith(network) for network in _NETWORK_PROFILE_DOMAINS):
+        return "public_structured_profile", 0.08, ["structured_public_profile"]
+    if detect_entity_type(result) in {"directory", "aggregator"}:
+        return "directory_aggregator", -0.2, ["directory_or_aggregator_source"]
+    if any(hint in text for hint in _LOW_AUTHORITY_BIO_HINTS):
+        return "low_authority_bio_seo", -0.24, ["low_authority_biography_patterns"]
+    return "public_structured_profile", 0.02, ["default_public_profile_assumption"]
+
+
+def _seo_bio_penalty(result: SearchResult) -> tuple[float, list[str]]:
+    text = _joined_text(result)
+    penalty = 0.0
+    reasons: list[str] = []
+    pattern_hits = [
+        "net worth",
+        "age",
+        "family",
+        "relationship",
+        "biography",
+        "facts",
+        "career",
+        "husband",
+        "wife",
+    ]
+    hits = [term for term in pattern_hits if term in text]
+    if len(hits) >= 2:
+        penalty += 0.14
+        reasons.append(f"seo_bio_terms:{','.join(hits[:4])}")
+    if re.search(r"\b(age|net worth|family|height)\b.*\b(age|net worth|family|height)\b", text):
+        penalty += 0.08
+        reasons.append("repetitive_personal_info_phrasing")
+    if detect_entity_type(result) in {"article", "unknown"} and "biography" in text and result.domain.count(".") >= 1:
+        penalty += 0.06
+        reasons.append("generic_biography_page_penalty")
+    return min(0.3, penalty), reasons
+
+
 def score_candidate(result: SearchResult, query_name: str, context: ContextQuery) -> ScoredCandidate:
     """Deterministic scoring with explicit bonuses/penalties for explainability."""
 
@@ -310,6 +437,8 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     entity_type = detect_entity_type(result)
     name_match = detect_name_match_quality(query_name, result)
     context_strength, context_reasons = context_match_strength(result, context)
+    authority_tier, authority_weight, authority_reasons = detect_source_authority(result)
+    seo_penalty, seo_reasons = _seo_bio_penalty(result)
     noisy = is_noise_result(result)
 
     score = 0.0
@@ -338,6 +467,9 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     }
     score += name_weights[name_match]
     reasons.append(f"name:{name_match}")
+    score += authority_weight
+    reasons.append(f"authority:{authority_tier}")
+    reasons.extend(authority_reasons)
 
     snippet_bonus = 0.0
     if result.snippet:
@@ -400,6 +532,13 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
     if noisy:
         score -= 0.35
         reasons.append("noise_penalty")
+    if seo_penalty > 0:
+        score -= seo_penalty
+        reasons.append(f"seo_penalty:{seo_penalty:.2f}")
+        reasons.extend(seo_reasons)
+    if result.domain.endswith("wikipedia.org") and context_strength < 0.15:
+        score -= 0.08
+        reasons.append("wikipedia_weak_context_penalty")
 
     return ScoredCandidate(
         result=result,
@@ -407,6 +546,8 @@ def score_candidate(result: SearchResult, query_name: str, context: ContextQuery
         entity_type=entity_type,
         name_match=name_match,
         context_strength=context_strength,
+        authority_tier=authority_tier,
+        seo_penalty=seo_penalty,
         is_noise=noisy,
         reasons=tuple(reasons),
     )
@@ -578,6 +719,7 @@ def resolve_identity(
     ranked = rank_candidates(results, query_name, context)
     if not ranked:
         return None
+    query_validity = assess_query_validity(query_name)
 
     top = ranked[0]
     second = ranked[1] if len(ranked) > 1 else None
@@ -598,22 +740,69 @@ def resolve_identity(
         resolution_path = "search_only"
 
     score_gap = top.score - second.score if second else 1.0
-    low_evidence = top.score < 0.4 or top.name_match == "weak_match" or top.entity_type in {"unknown", "article", "aggregator"}
+    source_diversity = len({item.result.domain for item in ranked[:5]})
+    has_context_constraints = any(
+        [
+            context.role,
+            context.organization,
+            context.location,
+            context.domain_activity,
+            context.media_platform,
+            context.institutional_hint,
+            context.generic_terms,
+            context.expected_domains,
+        ]
+    )
+    low_evidence = (
+        top.score < 0.45
+        or top.name_match == "weak_match"
+        or top.entity_type in {"unknown", "article", "aggregator"}
+        or top.authority_tier in {"directory_aggregator", "low_authority_bio_seo", "junk_or_malformed"}
+    )
     close_competition = second is not None and score_gap < 0.08 and second.score > 0.33
-    ambiguity_detected = low_evidence or close_competition
+    common_name_competition = (
+        not has_context_constraints
+        and second is not None
+        and top.name_match in {"full_match", "reordered_match"}
+        and second.name_match in {"full_match", "reordered_match", "partial_match"}
+        and score_gap < 0.22
+    )
+    ambiguity_detected = low_evidence or close_competition or common_name_competition or query_validity.status != "valid"
     ambiguity_reason = None
+    evidence_strength = top.score - query_validity.penalty
+    if source_diversity >= 3:
+        evidence_strength += 0.05
+    if second is not None and score_gap >= 0.18:
+        evidence_strength += 0.04
     confidence_label: Literal["high", "medium", "low"] = "high"
-    if ambiguity_detected:
+    if ambiguity_detected or evidence_strength < 0.48:
         confidence_label = "low"
-        ambiguity_reason = "weak_evidence" if low_evidence else "multiple_plausible_candidates"
-    elif top.score < 0.62 or (second is not None and score_gap < 0.16):
+        if query_validity.status != "valid":
+            ambiguity_reason = f"invalid_query:{query_validity.status}"
+        elif common_name_competition:
+            ambiguity_reason = "multiple_plausible_candidates"
+        else:
+            ambiguity_reason = "weak_evidence" if low_evidence else "multiple_plausible_candidates"
+    elif evidence_strength < 0.68 or (second is not None and score_gap < 0.16):
         confidence_label = "medium"
+    query_token_count = len(_normalized_tokens(query_name))
+    if (
+        not has_context_constraints
+        and query_validity.status == "valid"
+        and query_token_count <= 2
+        and top.authority_tier not in {"official_institutional", "strong_encyclopedic"}
+    ):
+        confidence_label = "low"
+        ambiguity_detected = True
+        ambiguity_reason = ambiguity_reason or "multiple_plausible_candidates"
 
     prefix = "AMBIGUOUS: " if ambiguity_detected else ""
     explanation = (
         f"{prefix}Selected {top.result.domain} with {top.name_match} and {top.entity_type}; "
-        f"signals: {', '.join(top.reasons[:5])}; path={resolution_path}; fetch={fetch_status}; "
-        f"score_gap={score_gap:.3f}; confidence={confidence_label}"
+        f"authority={top.authority_tier}; seo_penalty={top.seo_penalty:.2f}; "
+        f"query_validity={query_validity.status}; signals: {', '.join(top.reasons[:6])}; "
+        f"path={resolution_path}; fetch={fetch_status}; score_gap={score_gap:.3f}; "
+        f"evidence={evidence_strength:.3f}; confidence={confidence_label}"
     )
 
     return ResolutionOutput(

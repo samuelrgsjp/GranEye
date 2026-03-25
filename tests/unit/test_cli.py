@@ -23,6 +23,8 @@ def _fake_ranked(url: str = "https://example.com/in/laura") -> list[ScoredCandid
             entity_type="person_profile",
             name_match="full_match",
             context_strength=0.45,
+            authority_tier="public_structured_profile",
+            seo_penalty=0.0,
             is_noise=False,
             reasons=("entity:person_profile", "name:full_match"),
         )

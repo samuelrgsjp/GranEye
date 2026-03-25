@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 
 from graneye.resolution import (
     ContextQuery,
+    assess_query_validity,
     context_match_strength,
     detect_entity_type,
     detect_name_match_quality,
@@ -376,3 +377,93 @@ def test_academic_profile_outweighs_news_when_context_is_faculty() -> None:
         ContextQuery(role="professor", institutional_hint="university", location="Madrid"),
     )
     assert ranked[0].entity_type == "academic_profile"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_status"),
+    [("a", "too_short"), ("123456", "numeric_or_garbage"), ("profile", "too_generic"), ("John Smith", "valid")],
+)
+def test_query_validity_assessment_handles_invalid_and_valid_inputs(query: str, expected_status: str) -> None:
+    assert assess_query_validity(query).status == expected_status
+
+
+def test_low_authority_bio_page_gets_penalized_against_official_profile() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "Ada Lovelace age net worth family biography facts",
+                    "url": "https://celeb-bio-now.example.com/ada-lovelace-biography",
+                    "snippet": "Age, net worth, relationship, family and career facts.",
+                },
+                {
+                    "title": "Ada Lovelace - Encyclopaedia Britannica",
+                    "url": "https://www.britannica.com/biography/Ada-Lovelace",
+                    "snippet": "English mathematician and pioneer in computing.",
+                },
+            ]
+        ),
+        "Ada Lovelace",
+        ContextQuery(),
+    )
+    assert ranked[0].result.domain == "britannica.com"
+    assert ranked[1].authority_tier == "low_authority_bio_seo"
+    assert ranked[1].seo_penalty > 0.1
+
+
+def test_wikipedia_stays_low_confidence_when_only_weak_evidence_exists() -> None:
+    output = resolve_identity(
+        "Carlos Pérez",
+        enrich_search_results(
+            [
+                {
+                    "title": "Carlos Pérez - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Carlos_P%C3%A9rez",
+                    "snippet": "Carlos Pérez may refer to multiple people.",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.confidence_label == "low"
+    assert "query_validity=valid" in output.explanation
+
+
+def test_invalid_numeric_query_forces_low_confidence() -> None:
+    output = resolve_identity(
+        "123456",
+        enrich_search_results(
+            [
+                {
+                    "title": "123456 - Profile",
+                    "url": "https://example.com/profile/123456",
+                    "snippet": "Generic profile record",
+                }
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.confidence_label == "low"
+    assert output.ambiguity_reason == "invalid_query:numeric_or_garbage"
+
+
+def test_common_name_without_context_remains_low_confidence() -> None:
+    output = resolve_identity(
+        "John Smith",
+        enrich_search_results(
+            [
+                {
+                    "title": "John Smith | LinkedIn",
+                    "url": "https://www.linkedin.com/in/john-smith",
+                    "snippet": "View John Smith's profile",
+                },
+                {
+                    "title": "John Smith - Software Engineer",
+                    "url": "https://portfolio.example.com/john-smith",
+                    "snippet": "Software engineer portfolio",
+                },
+            ]
+        ),
+    )
+    assert output is not None
+    assert output.confidence_label == "low"

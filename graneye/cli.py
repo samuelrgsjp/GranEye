@@ -125,6 +125,7 @@ def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
         f"Filtered results count: {diagnostics.filtered_results_count}",
         f"Ranked candidates count: {diagnostics.ranked_candidates_count}",
         f"Source diversity (domains): {diagnostics.source_diversity_count}",
+        f"Query validity: {diagnostics.query_validity}",
         f"Context interpretation: {diagnostics.context_interpretation or '(none)'}",
         f"Ambiguity triggered: {'yes' if diagnostics.ambiguity_triggered else 'no'}",
         f"Ambiguity reason: {diagnostics.ambiguity_reason or '(none)'}",
@@ -167,7 +168,8 @@ def _render_debug_output(diagnostics: SearchPipelineDiagnostics) -> str:
                 f"{idx:02d}. keep reason=ranked | title={result.title or '(empty)'} | "
                 f"url={result.url} | domain={result.domain or '(empty)'} | "
                 f"snippet={snippet_flag} | entity={candidate.entity_type} | "
-                f"name_match={candidate.name_match} | context={candidate.context_strength:.3f} | "
+                f"name_match={candidate.name_match} | authority={candidate.authority_tier} | "
+                f"seo_penalty={candidate.seo_penalty:.2f} | context={candidate.context_strength:.3f} | "
                 f"final={candidate.score:.3f} | signals={','.join(candidate.reasons[:8])}"
             )
         )
