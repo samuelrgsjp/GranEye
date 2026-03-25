@@ -284,6 +284,39 @@ def test_low_confidence_when_only_weak_generic_results_exist() -> None:
     assert output.confidence_label == "low"
 
 
+def test_representative_selection_is_deterministic_for_identical_candidates() -> None:
+    candidate_a = {
+        "title": "Jane Doe - Leadership",
+        "url": "https://www.example.com/leadership/jane-doe",
+        "snippet": "Official leadership bio for Jane Doe.",
+    }
+    candidate_b = {
+        "title": "Jane Doe - Leadership",
+        "url": "https://www.example.org/team/jane-doe",
+        "snippet": "Official team profile for Jane Doe.",
+    }
+
+    first_order = resolve_identity(
+        "Jane Doe",
+        enrich_search_results([candidate_a, candidate_b]),
+        role="CEO",
+        organization="Example",
+        fetcher=lambda _url: "",
+    )
+    second_order = resolve_identity(
+        "Jane Doe",
+        enrich_search_results([candidate_b, candidate_a]),
+        role="CEO",
+        organization="Example",
+        fetcher=lambda _url: "",
+    )
+    assert first_order is not None
+    assert second_order is not None
+    assert first_order.source_url == second_order.source_url
+    assert first_order.normalized_candidate_name == second_order.normalized_candidate_name
+    assert first_order.no_resolution == second_order.no_resolution
+
+
 def test_ambiguous_common_name_sets_multiple_plausible_reason() -> None:
     output = resolve_identity(
         "John Smith",

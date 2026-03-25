@@ -332,6 +332,13 @@ def _run_search(
             combined_results.append(item)
         if len(combined_results) >= 12:
             break
+    combined_results.sort(
+        key=lambda item: (
+            _canonicalize_url(str(item.get("url") or item.get("link") or "")),
+            str(item.get("title") or "").casefold(),
+            str(item.get("snippet") or item.get("description") or "").casefold(),
+        )
+    )
     return combined_results, tuple(attempted_queries)
 
 
