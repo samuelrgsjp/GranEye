@@ -54,7 +54,7 @@ def test_resolve_query_retries_with_name_only_when_context_query_is_empty() -> N
     )
     assert output is not None
     assert ranked
-    assert seen_queries == ["Satya Nadella Microsoft CEO", "Satya Nadella"]
+    assert seen_queries == ["Satya Nadella Microsoft CEO", "\"Satya Nadella\" Microsoft CEO", "Satya Nadella"]
 
 
 def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
@@ -76,6 +76,7 @@ def test_resolve_query_with_debug_reports_counts_and_filter_decisions() -> None:
     assert diagnostics.normalized_results_count == 2
     assert diagnostics.filtered_results_count == 1
     assert diagnostics.ranked_candidates_count == len(ranked)
+    assert diagnostics.query_attempts[0] == "Satya Nadella Microsoft CEO"
     assert any(decision.reason == "search_engine_or_internal" for decision in diagnostics.filter_decisions)
     assert diagnostics.ranked_candidates
 

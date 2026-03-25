@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 _DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 _DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
 _DDG_INSTANT_ENDPOINT = "https://api.duckduckgo.com/"
+_WIKIPEDIA_OPENSEARCH_ENDPOINT = "https://en.wikipedia.org/w/api.php"
 _DDG_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -46,6 +47,7 @@ _SEARCH_ENGINE_HOSTS = {
     "bing.com",
     "search.yahoo.com",
 }
+_SEARCH_REDIRECT_HOSTS = {"r.search.yahoo.com"}
 _DDG_INTERNAL_PATH_HINTS = (
     "/privacy",
     "/help",
@@ -96,7 +98,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         href = attrs_dict.get("href", "").strip()
         if tag.casefold() == "a" and href and self._is_result_link(class_attr):
             self._capturing_title = True
-            self._current_url = _resolve_ddg_redirect(unescape(href))
+            self._current_url = _resolve_known_redirects(_resolve_ddg_redirect(unescape(href)))
 
         if self._is_snippet_container(class_attr):
             self._capturing_snippet = True
@@ -209,6 +211,15 @@ def _resolve_ddg_redirect(url: str) -> str:
     return unescape(unquote(uddg_values[0])).strip()
 
 
+def _resolve_known_redirects(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc.casefold().removeprefix("www.")
+    query = parse_qs(parsed.query)
+    if host in _SEARCH_REDIRECT_HOSTS and query.get("RU"):
+        return unescape(unquote(query["RU"][0])).strip()
+    return url
+
+
 def _is_likely_web_result(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -217,6 +228,8 @@ def _is_likely_web_result(url: str) -> bool:
     if not host:
         return False
     if host.endswith("duckduckgo.com") and parsed.path.startswith("/y.js"):
+        return False
+    if host in _SEARCH_REDIRECT_HOSTS and not parse_qs(parsed.query).get("RU"):
         return False
     return True
 
@@ -272,6 +285,8 @@ def evaluate_candidate_result(title: str, url: str, snippet: str = "") -> Filter
         return FilterDecision(result=result, accepted=False, reason="trivial_title")
     if not urlparse(url).netloc:
         return FilterDecision(result=result, accepted=False, reason="missing_domain")
+    if len(title) > 220:
+        return FilterDecision(result=result, accepted=False, reason="title_too_long")
     text = " ".join(part for part in [title, snippet] if part).casefold()
     if any(token in text for token in ("duckduckgo", "privacy", "protection", "safe search")):
         return FilterDecision(result=result, accepted=False, reason="search_engine_noise_text")
@@ -287,7 +302,7 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
     fallback_snippets: dict[str, str] = {}
     for link_match in _FALLBACK_RESULT_LINK_PATTERN.finditer(html):
         raw_url = unescape(link_match.group(2).strip())
-        resolved_url = _resolve_ddg_redirect(raw_url)
+        resolved_url = _resolve_known_redirects(_resolve_ddg_redirect(raw_url))
         if not resolved_url:
             continue
         trailing_chunk = html[link_match.end() : link_match.end() + 1200]
@@ -312,7 +327,7 @@ def parse_duckduckgo_html_results(html: str, *, max_results: int = 10) -> list[d
     # Fallback extraction for HTML layout variants where result wrappers/classes differ.
     for link_match in _FALLBACK_RESULT_LINK_PATTERN.finditer(html):
         raw_url = unescape(link_match.group(2).strip())
-        url = _resolve_ddg_redirect(raw_url)
+        url = _resolve_known_redirects(_resolve_ddg_redirect(raw_url))
         title = _clean_html_text(link_match.group(3))
         trailing_chunk = html[link_match.end() : link_match.end() + 700]
         snippet_match = _RESULT_SNIPPET_PATTERN.search(trailing_chunk)
@@ -348,12 +363,14 @@ def search_duckduckgo_html(query: str, *, max_results: int = 10) -> list[dict[st
         },
     )
 
-    with urlopen(request, timeout=10) as response:
-        html = response.read(600_000).decode("utf-8", errors="ignore")
-
-    results = parse_duckduckgo_html_results(html, max_results=max_results)
-    if results:
-        return results
+    try:
+        with urlopen(request, timeout=10) as response:
+            html = response.read(600_000).decode("utf-8", errors="ignore")
+        results = parse_duckduckgo_html_results(html, max_results=max_results)
+        if results:
+            return results
+    except Exception:
+        pass
     return search_duckduckgo_lite(query, max_results=max_results)
 
 
@@ -377,14 +394,17 @@ def search_duckduckgo_lite(query: str, *, max_results: int = 10) -> list[dict[st
 
 
 def search_duckduckgo_instant_answer(query: str, *, max_results: int = 10) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
     encoded = quote_plus(query)
     url = f"{_DDG_INSTANT_ENDPOINT}?q={encoded}&format=json&no_html=1&skip_disambig=1"
     request = Request(url, headers={"User-Agent": _DDG_USER_AGENT, "Accept": "application/json"})
-
-    with urlopen(request, timeout=10) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    normalized: list[dict[str, str]] = []
+    try:
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
 
     abstract_url = str(payload.get("AbstractURL", "")).strip()
     if abstract_url:
@@ -416,7 +436,35 @@ def search_duckduckgo_instant_answer(query: str, *, max_results: int = 10) -> li
                 if isinstance(child, dict):
                     append_topic(child)
 
-    return normalized[:max_results]
+    if normalized:
+        return normalized[:max_results]
+    return search_wikipedia_opensearch(query, max_results=max_results)
+
+
+def search_wikipedia_opensearch(query: str, *, max_results: int = 5) -> list[dict[str, str]]:
+    encoded = quote_plus(query)
+    url = (
+        f"{_WIKIPEDIA_OPENSEARCH_ENDPOINT}?action=opensearch&search={encoded}"
+        "&limit=10&namespace=0&format=json"
+    )
+    request = Request(url, headers={"User-Agent": _DDG_USER_AGENT, "Accept": "application/json"})
+    with urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, list) or len(payload) < 4:
+        return []
+    titles = payload[1] if isinstance(payload[1], list) else []
+    descriptions = payload[2] if isinstance(payload[2], list) else []
+    urls = payload[3] if isinstance(payload[3], list) else []
+    normalized: list[dict[str, str]] = []
+    for idx, raw_url in enumerate(urls):
+        candidate_url = str(raw_url).strip()
+        title = str(titles[idx]).strip() if idx < len(titles) else ""
+        snippet = str(descriptions[idx]).strip() if idx < len(descriptions) else ""
+        if _is_candidate_worthy_result(title, candidate_url, snippet):
+            normalized.append({"title": title or query, "url": candidate_url, "snippet": snippet})
+        if len(normalized) >= max_results:
+            break
+    return normalized
 
 
 def normalize_search_result(payload: Mapping[str, Any]) -> SearchResult:
@@ -424,7 +472,8 @@ def normalize_search_result(payload: Mapping[str, Any]) -> SearchResult:
 
     title = _to_text(payload.get("title"))
     snippet_raw = _to_text(payload.get("snippet") or payload.get("description"))
-    url = _to_text(payload.get("url") or payload.get("link"))
+    raw_url = _to_text(payload.get("url") or payload.get("link"))
+    url = _resolve_known_redirects(_resolve_ddg_redirect(raw_url))
 
     parsed = urlparse(url)
     domain = parsed.netloc.casefold().removeprefix("www.") if parsed.netloc else ""

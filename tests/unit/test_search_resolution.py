@@ -206,6 +206,28 @@ def test_common_name_ranking_prefers_context_match_over_plain_exact_match() -> N
     assert ranked[0].result.url == "https://security-spain.example.org/in/carlos-perez"
 
 
+def test_context_aligned_company_page_can_beat_low_context_linkedin() -> None:
+    ranked = rank_candidates(
+        enrich_search_results(
+            [
+                {
+                    "title": "John Smith | LinkedIn",
+                    "url": "https://www.linkedin.com/in/john-smith",
+                    "snippet": "View John Smith's professional profile.",
+                },
+                {
+                    "title": "John Smith - Platform Engineering Director | ExampleAI",
+                    "url": "https://exampleai.com/company/leadership/john-smith",
+                    "snippet": "John Smith is Platform Engineering Director at ExampleAI in London.",
+                },
+            ]
+        ),
+        "John Smith",
+        ContextQuery(profession="Platform Engineering Director", location="London"),
+    )
+    assert ranked[0].result.url == "https://exampleai.com/company/leadership/john-smith"
+
+
 @pytest.mark.parametrize(
     ("html", "expected_role", "expected_org", "expected_location"),
     [

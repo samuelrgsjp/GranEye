@@ -15,6 +15,7 @@ GranEye is a modular Python OSINT prototype with deterministic analysis and iden
 ## Quick Start
 
 ```bash
+pip install -e .
 python -m pytest
 ```
 
@@ -32,17 +33,24 @@ Notes:
 - `target_context` is optional and can improve disambiguation.
 - Use `graneye --help` for argument details.
 - CLI output includes `Resolution path` (`full_content`, `partial_content`, `search_only`, or `fetch_blocked`) and `Fetch status`.
+- `--debug` prints query attempts, raw/normalized/filtered/ranked counts, discarded candidates with reasons, retained candidates, and scored ranking signals.
 
 ## Reliability Behavior
 
 GranEye uses layered fallback so a blocked page fetch does not invalidate ranking:
 
-1. Query DuckDuckGo HTML endpoint, then supplement with Instant Answer topics.
+1. Run multiple query variants (`name + context`, quoted name + context, and name-only), using DuckDuckGo HTML with Lite fallback plus Instant Answer topics.
 2. Rank all normalized results using deterministic identity/context signals.
 3. Attempt to fetch the top candidate page for enrichment.
 4. If fetching fails or is blocked, keep ranked search evidence and return a search-grounded result instead of failing the full pipeline.
 
 This means output can still be meaningful even when a website denies bot-like requests.
+
+## Current Limitations
+
+- Search quality still depends on third-party search result markup and may vary by geography or anti-bot behavior.
+- Context parsing is rule-based (not semantic NLP), so very long or unusual context prompts may underperform.
+- Page enrichment intentionally uses lightweight parsing; heavily client-rendered pages may return partial signals.
 
 ## Package Layout
 
