@@ -61,17 +61,27 @@ write_summary_block() {
   local name="$2"
   local context="$3"
   local block="$4"
+  local resolution reason top_candidate
+
+  resolution="$(extract_field "$block" "Resolution")"
+  reason="$(extract_field "$block" "Reason")"
+  top_candidate="$(extract_field "$block" "Top candidate")"
+
+  if [[ "$resolution" == "(none)" && "$top_candidate" != "(none)" ]]; then
+    resolution="resolved"
+    reason="(resolved)"
+  fi
 
   {
     printf 'CASE: [%s] %s | %s\n' "$group" "$name" "${context:-<none>}"
     printf 'Query validity: %s\n' "$(extract_field "$block" "Query validity")"
-    printf 'Top candidate: %s\n' "$(extract_field "$block" "Top candidate")"
+    printf 'Top candidate: %s\n' "$top_candidate"
     printf 'Source URL: %s\n' "$(extract_field "$block" "Source URL")"
     printf 'Display title: %s\n' "$(extract_field "$block" "Display title")"
     printf 'Same-person probability: %s\n' "$(extract_field "$block" "Same-person probability")"
     printf 'Context match probability: %s\n' "$(extract_field "$block" "Context match probability")"
-    printf 'Resolution: %s\n' "$(extract_field "$block" "Resolution")"
-    printf 'Reason: %s\n' "$(extract_field "$block" "Reason")"
+    printf 'Resolution: %s\n' "$resolution"
+    printf 'Reason: %s\n' "$reason"
     printf 'Confidence: %s\n' "$(extract_field "$block" "Confidence")"
     printf 'Ambiguity reason: %s\n' "$(extract_field "$block" "Ambiguity reason")"
     printf 'Decision reason: %s\n' "$(extract_field "$block" "Decision reason")"
